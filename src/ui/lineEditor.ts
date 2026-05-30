@@ -119,6 +119,8 @@ class Editor {
   private histIdx = -1; // -1 = current (not recalled)
   /** Timestamp of the last Ctrl-C on an empty buffer, for double-press exit (#7). */
   private lastCtrlC = 0;
+  /** Timestamp of the first Esc press in a slash-command context. */
+  private lastEsc = 0;
   private readonly history: string[];
   private readonly opts: EditorOptions;
   private readonly resolve: (r: EditorResult) => void;
@@ -192,6 +194,7 @@ class Editor {
     // Ctrl-C: cancel in a picker; clear a non-empty line; on an empty buffer a
     // double-press within 1s exits (single press shows a dim hint — #7).
     if (key.ctrl && key.name === "c") {
+      this.lastEsc = 0;
       if (this.mode === "pick") return this.finish({ kind: "cancel" });
       if (this.bufferText() !== "") {
         this.lines = [""];
@@ -215,51 +218,90 @@ class Editor {
     // set on the KeySource; newlines in it must be inserted as text, not submit.
     if (this.opts.keys.pasting && str && !key.ctrl && !key.meta) {
       this.insertText(str);
+      this.lastEsc = 0;
       return this.draw();
     }
 
     switch (key.name) {
       case "return":
       case "enter":
+        this.lastEsc = 0;
         return this.onEnter(key);
       case "backspace":
+        this.lastEsc = 0;
         return this.onBackspace();
       case "delete":
+        this.lastEsc = 0;
         return this.onDelete();
       case "left":
+        this.lastEsc = 0;
         return this.moveLeft();
       case "right":
+        this.lastEsc = 0;
         return this.moveRight();
       case "up":
+        this.lastEsc = 0;
         return this.onUp();
       case "down":
+        this.lastEsc = 0;
         return this.onDown();
       case "home":
+        this.lastEsc = 0;
         this.col = 0;
         return this.draw();
       case "end":
+        this.lastEsc = 0;
         this.col = (this.lines[this.row] ?? "").length;
         return this.draw();
       case "escape":
-        if (this.mode === "menu") {
-          this.closeMenu();
-          return this.draw();
-        }
-        return;
+        return this.onEscape();
       case "tab":
+        this.lastEsc = 0;
         if (this.mode === "menu") return this.acceptMenu();
         return;
     }
 
-    if (key.ctrl) return this.onCtrlChord(key);
-    if (key.meta) return; // unhandled Alt-chord
+    if (key.ctrl) {
+      this.lastEsc = 0;
+      return this.onCtrlChord(key);
+    }
+    if (key.meta) {
+      this.lastEsc = 0;
+      return; // unhandled Alt-chord
+    }
 
     // Printable input.
     if (str && !key.ctrl && !key.meta) {
+      this.lastEsc = 0;
       this.insertText(str);
       this.refreshMenu();
       return this.draw();
     }
+  }
+
+  /**
+   * Esc has two meanings:
+   *  - a single press closes the live menu if one is open
+   *  - a double press on an EMPTY prompt submits `/rewind`
+   */
+  private onEscape(): void {
+    if (this.mode === "pick") return this.finish({ kind: "cancel" });
+
+    const now = Date.now();
+    const empty = this.bufferText() === "";
+    const armed = empty && this.lastEsc !== 0 && now - this.lastEsc < 1000;
+
+    if (this.mode === "menu") {
+      this.closeMenu();
+    }
+
+    if (armed) {
+      this.lastEsc = 0;
+      return this.finish({ kind: "submit", value: "/rewind" });
+    }
+
+    this.lastEsc = empty ? now : 0;
+    return this.draw();
   }
 
   // --- text mutation ---
@@ -587,6 +629,8 @@ class Editor {
       const view = renderMenu(
         this.menuItems.map((m): MenuRow => ({ label: m.label, hint: m.hint })),
         this.menuSel,
+        undefined,
+        cols,
       );
       for (const r of view.rows) out.push(r);
     }
@@ -622,6 +666,8 @@ class Editor {
     const view = renderMenu(
       this.menuItems.map((m): MenuRow => ({ label: m.label, hint: m.hint })),
       this.menuSel,
+      undefined,
+      stdout.columns ?? 80,
     );
     for (const r of view.rows) out.push(r);
     stdout.write(out.join("\n"));
@@ -653,4 +699,3 @@ class Editor {
     this.lastCursorRow = 0;
   }
 }
-

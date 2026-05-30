@@ -127,8 +127,9 @@ export class LineReader {
    * Route Ctrl-C to `onCtrlC` for the duration of a streaming turn. In raw mode
    * Ctrl-C arrives as byte 0x03 on stdin (no SIGINT fires), so we install a
    * temporary key handler and return a disposer that restores idle handling.
+   * Esc is also wired here so the user can abort a running reply with Esc.
    */
-  captureInterrupts(onCtrlC: () => void): () => void {
+  captureInterrupts(onCtrlC: () => void, onEsc?: () => void): () => void {
     if (!this.isTTY) {
       // Non-TTY: fall back to SIGINT for the duration.
       const onSig = (): void => onCtrlC();
@@ -137,6 +138,7 @@ export class LineReader {
     }
     this.keys.onKey((_str, key) => {
       if (key.ctrl && key.name === "c") onCtrlC();
+      if (key.name === "escape") onEsc?.();
     });
     return () => this.keys.onKey(null);
   }

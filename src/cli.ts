@@ -9,10 +9,10 @@ import type { SessionState } from "./commands/registry.js";
 import { PermissionPolicy } from "./permissions/policy.js";
 import { createGate, type Confirmer, type ConfirmRequest } from "./permissions/confirm.js";
 import { Renderer } from "./ui/render.js";
-import { box, bold, cyan, dim, symbols } from "./ui/theme.js";
+import { box, bold, cyan, dim, symbols, visibleWidth } from "./ui/theme.js";
 import { statusLine, workdirLine } from "./ui/status.js";
 import { contextWindowFor } from "./model/contextWindow.js";
-import { mascot } from "./ui/mascot.js";
+import { beside, mascot, mascotTagline } from "./ui/mascot.js";
 import { InterruptController } from "./ui/interrupt.js";
 import { LineReader } from "./ui/input.js";
 import { renderTranscript } from "./ui/transcript.js";
@@ -24,6 +24,12 @@ import { loadCustomCommandDefs, buildCustomCommands } from "./ext/commands.js";
 import { searchFiles } from "./ext/fileSearch.js";
 import { runShell } from "./util/shell.js";
 import { gitBranchCached } from "./util/git.js";
+import { cloneTodos, type TodoItem } from "./todos.js";
+import { ToolRegistry } from "./tools/registry.js";
+import type { Message } from "./model/types.js";
+import type { LoopStopReason } from "./loop/types.js";
+import type { SubagentRequest, SubagentResult } from "./subagents.js";
+import { LocalMcpRuntime } from "./mcp/runtime.js";
 
 /**
  * CLI entry — the REPL that wires every module together (docs/01, docs/08).
@@ -103,6 +109,7 @@ async function main(): Promise<void> {
   }
 
   const registry = defaultRegistry({ bashTimeoutMs: config.bashTimeoutMs });
+  const mcp = new LocalMcpRuntime(config.workdir);
   const policy = new PermissionPolicy();
 
   // Session state with a mutable provider/config: slash commands can switch the
@@ -115,6 +122,7 @@ async function main(): Promise<void> {
     session: newSession({ provider: config.provider, model: config.model }),
     mode: policy.getMode(),
     usage: { input: 0, output: 0 },
+    todos: [],
     pendingContext: [],
     rebuild() {
       const next = resolveConfig();
@@ -130,6 +138,7 @@ async function main(): Promise<void> {
       this.session.messages = this.history;
       this.session.provider = this.config.provider;
       this.session.model = this.config.model;
+      this.session.todos = cloneTodos(this.todos);
       if (this.session.title === "Untitled") {
         this.session.title = deriveTitle(this.history);
       }
@@ -173,8 +182,85 @@ async function main(): Promise<void> {
     workdir: config.workdir,
     notify: (req) => renderer.notify(req.summary),
   });
+  const subagentGate = createGate({
+    policy,
+    confirmer,
+    workdir: config.workdir,
+  });
 
-  stdout.write(mascot() + "\n");
+  const runSubagent = async (request: SubagentRequest): Promise<SubagentResult> => {
+    const allowedNames = new Set(
+      request.toolWhitelist !== undefined ? request.toolWhitelist : DEFAULT_SUBAGENT_TOOLS,
+    );
+    const missing = [...allowedNames].filter((name) => !registry.get(name));
+    if (missing.length > 0) {
+      throw new Error(
+        `Unknown tools in tool_whitelist: ${missing.join(", ")}. ` +
+          `Available tools: ${registry.list().map((t) => t.name).join(", ")}.`,
+      );
+    }
+
+    const subRegistry = new ToolRegistry(
+      registry.list().filter((tool) => allowedNames.has(tool.name)),
+    );
+    const history: Message[] = [];
+    let todos: TodoItem[] = [];
+    let currentText = "";
+    let summary = "";
+    let doneReason: LoopStopReason | null = null;
+    let turns = 0;
+    const system = [
+      systemPrompt(state.config.workdir),
+      "",
+      "You are running as an isolated subagent.",
+      "Focus only on the assigned subtask, keep the parent context small, and",
+      "finish with a concise summary of what matters.",
+    ].join("\n");
+    const userInput = request.instructions?.trim()
+      ? `${request.task}\n\nAdditional instructions:\n${request.instructions}`
+      : request.task;
+
+    for await (const ev of runAgentLoop({
+      provider: state.provider,
+      registry: subRegistry,
+      system,
+      userInput,
+      history,
+      maxTurns: request.maxTurns ?? 8,
+      workdir: state.config.workdir,
+      ...(state.config.thinkingDepth ? { thinking: state.config.thinkingDepth } : {}),
+      ...(state.mode === "allowAll" ? { allowOutsideWorkdir: true } : {}),
+      ...(request.signal ? { signal: request.signal } : {}),
+      todoStore: {
+        get: () => cloneTodos(todos),
+        set: (items) => {
+          todos = cloneTodos(items);
+        },
+      },
+      gate: subagentGate,
+      runSubagent: undefined,
+      mcp,
+    })) {
+      if (ev.type === "turn_start") currentText = "";
+      else if (ev.type === "text_delta") currentText += ev.text;
+      else if (ev.type === "done") {
+        doneReason = ev.reason;
+        turns = ev.turns;
+        if (currentText.trim()) summary = currentText.trim();
+      }
+    }
+
+    if (doneReason !== "end_turn") {
+      throw new Error(
+        `subagent stopped with ${doneReason ?? "unknown reason"} after ${turns} turn(s).`,
+      );
+    }
+    if (!summary) {
+      throw new Error("subagent returned an empty summary.");
+    }
+    return { summary, turns, history };
+  };
+
   printBanner(state.config, state.profileName);
   stdout.write(
     dim("  Type a request, ") +
@@ -213,7 +299,8 @@ async function main(): Promise<void> {
         }) + "\n",
       );
     }
-    const seed = seedNext;
+    const seed = state.seedInput ?? seedNext;
+    state.seedInput = undefined;
     seedNext = undefined;
     let input = (await reader.ask(cyan(symbols.arrow) + " ", seed)).trim();
     // Double Ctrl-C on an empty prompt asks to quit (#7).
@@ -242,6 +329,9 @@ async function main(): Promise<void> {
       if (state.queuedInput) {
         input = state.queuedInput;
         state.queuedInput = undefined;
+      } else if (state.seedInput) {
+        stdout.write("\n");
+        continue;
       } else {
         stdout.write("\n");
         continue;
@@ -249,7 +339,10 @@ async function main(): Promise<void> {
     }
 
     const interrupt = new InterruptController();
-    const stopListening = reader.captureInterrupts(() => interrupt.abort());
+    const stopListening = reader.captureInterrupts(
+      () => interrupt.abort(),
+      () => interrupt.abort(),
+    );
 
     // Drain any pending skill context into the system prompt for THIS turn only
     // (B2 progressive disclosure). Untrusted data — never bypasses the gate.
@@ -274,7 +367,16 @@ async function main(): Promise<void> {
           : {}),
         // allowAll mode lifts the workdir sandbox for filesystem tools (#9).
         ...(state.mode === "allowAll" ? { allowOutsideWorkdir: true } : {}),
+        todoStore: {
+          get: () => cloneTodos(state.todos),
+          set: (items) => {
+            state.todos = cloneTodos(items);
+            state.session.todos = cloneTodos(items);
+          },
+        },
         gate,
+        runSubagent,
+        mcp,
       })) {
         renderer.on(ev);
       }
@@ -304,6 +406,7 @@ async function main(): Promise<void> {
 
 /** Fraction of the context window at which auto-compaction kicks in (#1). */
 const COMPACT_THRESHOLD = 0.85;
+const DEFAULT_SUBAGENT_TOOLS = ["read", "ls", "grep", "glob", "todo_read"] as const;
 
 /**
  * If the last turn's input tokens crossed COMPACT_THRESHOLD of the model's
@@ -379,7 +482,20 @@ function printBanner(config: Config, profileName: string | null): void {
   ];
   if (config.baseURL) lines.push(`${dim("endpoint")} ${config.baseURL}`);
   lines.push(`${dim("workdir")}  ${config.workdir}`);
-  stdout.write(box("Harness-Agent", lines) + "\n");
+  const right = [
+    mascotTagline(),
+    ...box("Session", lines).split("\n"),
+  ];
+  const left = mascot().split("\n");
+  const cols = process.stdout.columns ?? 80;
+  const widestLeft = Math.max(0, ...left.map(visibleWidth));
+  const widestRight = Math.max(0, ...right.map(visibleWidth));
+  const inlineWidth = widestLeft + 3 + widestRight;
+  const block =
+    process.stdout.isTTY && inlineWidth <= cols
+      ? beside(left, right, 3)
+      : [...left, "", ...right].join("\n");
+  stdout.write(block + "\n");
 }
 
 function indent(text: string): string {

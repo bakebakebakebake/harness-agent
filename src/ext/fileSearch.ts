@@ -1,5 +1,5 @@
-import { readdirSync, statSync } from "node:fs";
-import { join, relative, basename, dirname } from "node:path";
+import { basename, dirname } from "node:path";
+import { walkRelativeFiles } from "../util/fileTree.js";
 
 /**
  * File search for the `@` mention menu (#4).
@@ -11,16 +11,6 @@ import { join, relative, basename, dirname } from "node:path";
  * large trees.
  */
 
-const SKIP_DIRS = new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  "coverage",
-  ".next",
-  ".cache",
-]);
-
 /** Hard cap on files visited per search so a huge tree can't stall the UI. */
 const MAX_WALK = 8000;
 
@@ -29,35 +19,6 @@ export interface FileHit {
   path: string;
   /** Directory portion for a dim hint, or "" at the root. */
   dir: string;
-}
-
-/** Recursively collect relative file paths under `dir`, skipping noise dirs. */
-function walk(root: string, dir: string, out: string[], budget: { n: number }): void {
-  if (budget.n <= 0) return;
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (budget.n <= 0) return;
-    if (entry.startsWith(".") && SKIP_DIRS.has(entry)) continue;
-    const full = join(dir, entry);
-    let st;
-    try {
-      st = statSync(full);
-    } catch {
-      continue;
-    }
-    if (st.isDirectory()) {
-      if (SKIP_DIRS.has(entry)) continue;
-      walk(root, full, out, budget);
-    } else if (st.isFile()) {
-      out.push(relative(root, full).split("\\").join("/"));
-      budget.n -= 1;
-    }
-  }
 }
 
 /**
@@ -85,8 +46,10 @@ function score(pathLower: string, baseLower: string, q: string): number {
  * Search files under `workdir` matching `query`, best first, capped at `limit`.
  */
 export function searchFiles(workdir: string, query: string, limit = 20): FileHit[] {
-  const files: string[] = [];
-  walk(workdir, workdir, files, { n: MAX_WALK });
+  const files = walkRelativeFiles(workdir, {
+    includeHidden: true,
+    maxFiles: MAX_WALK,
+  });
   const q = query.toLowerCase();
   const scored: Array<{ path: string; s: number }> = [];
   for (const path of files) {

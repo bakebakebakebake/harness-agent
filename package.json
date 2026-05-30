@@ -1,6 +1,6 @@
 {
   "name": "harness-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "A minimal coding agent CLI built from the docs/ architecture reference",
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.32.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "diff": "7.0.0",
     "zod": "3.24.1"
   },

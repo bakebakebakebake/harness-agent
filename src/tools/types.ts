@@ -1,4 +1,7 @@
 import type { ToolSpec } from "../model/types.js";
+import type { TodoItem } from "../todos.js";
+import type { SubagentRunner } from "../subagents.js";
+import type { McpRuntime } from "../mcp/types.js";
 
 /**
  * Tool layer types — see docs/02-tool-design.md.
@@ -30,6 +33,23 @@ export interface ToolContext {
    * safe default for every other permission mode.
    */
   allowOutsideWorkdir?: boolean;
+  /** Session-scoped todo state for planning/progress tools. */
+  getTodos?: () => TodoItem[];
+  /** Replace the current session todo list. */
+  setTodos?: (items: TodoItem[]) => void;
+  /** Live tool pool, used by MCP loading to register newly discovered tools. */
+  registry?: ToolRegistryLike;
+  /** Nested-agent runner, used by the `subagent` tool. */
+  runSubagent?: SubagentRunner;
+  /** MCP runtime for deferred-loading and tool execution. */
+  mcp?: McpRuntime;
+}
+
+/** Minimal tool-pool interface exposed to tools that need to register more tools. */
+export interface ToolRegistryLike {
+  register(tool: Tool): void;
+  get(name: string): Tool | undefined;
+  list(): Tool[];
 }
 
 /** The outcome of running a tool. */

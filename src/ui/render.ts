@@ -70,6 +70,17 @@ export class Renderer {
       }
 
       case "tool_result": {
+        if (ev.name === "todo_write" && !ev.isError) {
+          process.stdout.write(dim(`  ${symbols.bullet} ${firstLine(ev.content, 100)}\n`));
+          if (ev.details && ev.details.trim()) {
+            const body = ev.details
+              .split("\n")
+              .map((l) => "      " + l)
+              .join("\n");
+            process.stdout.write(body + "\n");
+          }
+          break;
+        }
         const status = ev.isError ? red(symbols.fail) : dim(symbols.ok);
         const preview = firstLine(ev.content, 100);
         process.stdout.write(`    ${status} ${dim(preview)}\n`);

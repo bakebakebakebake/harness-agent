@@ -6,6 +6,11 @@ import { editTool } from "./edit.js";
 import { writeTool } from "./write.js";
 import { grepTool } from "./grep.js";
 import { lsTool } from "./ls.js";
+import { globTool } from "./glob.js";
+import { todoReadTool, todoWriteTool } from "./todo.js";
+import { createShellTool } from "./shell.js";
+import { createSubagentTool } from "./subagent.js";
+import { mcpSearchTool } from "./mcp.js";
 import { createBashTool } from "./bash.js";
 
 /**
@@ -49,6 +54,12 @@ export function defaultRegistry(opts: { bashTimeoutMs: number }): ToolRegistry {
     readTool,
     lsTool,
     grepTool,
+    globTool,
+    todoReadTool,
+    todoWriteTool,
+    createShellTool({ defaultTimeoutMs: opts.bashTimeoutMs }),
+    createSubagentTool(),
+    mcpSearchTool,
     editTool,
     writeTool,
     createBashTool({ defaultTimeoutMs: opts.bashTimeoutMs }),

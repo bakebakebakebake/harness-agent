@@ -55,4 +55,19 @@ describe("renderMenu", () => {
     const joined = rows.map(plain).join("\n");
     expect(joined).toMatch(/more/);
   });
+
+  it("truncates rows so they do not wrap at the terminal edge", () => {
+    const { rows } = renderMenu(
+      [
+        {
+          label: "/mode",
+          hint: "Show or set the permission mode (default|plan|acceptEdits|allowAll)",
+        },
+      ],
+      0,
+      8,
+      40,
+    );
+    expect(plain(rows[0]!).length).toBeLessThanOrEqual(40);
+  });
 });

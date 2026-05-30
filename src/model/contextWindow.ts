@@ -28,8 +28,9 @@ const TABLE: Array<[RegExp, number]> = [
   [/^gpt-4/i, 128_000],
   // Legacy 3.5-turbo: 16k.
   [/^gpt-3\.5/i, 16_385],
-  // DeepSeek: V3/chat and R1/reasoner are 64k (older). Split out in case newer
-  // ids ship a larger window — keep conservative, override covers the rest.
+  // DeepSeek V4 tiers on some compatible gateways expose 1M windows.
+  [/^deepseek-v4/i, 1_000_000],
+  // Older/publicly common DeepSeek chat/reasoner ids are kept conservative.
   [/^deepseek-reasoner/i, 64_000],
   [/^deepseek/i, 64_000],
   // Moonshot / Kimi: up to 128k for the long-context tiers.
@@ -47,7 +48,7 @@ const TABLE: Array<[RegExp, number]> = [
 ];
 
 /** Conservative fallback when the model id matches nothing in the table. */
-export const DEFAULT_CONTEXT_WINDOW = 128_000;
+export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 /**
  * Best-effort context window for a model id.

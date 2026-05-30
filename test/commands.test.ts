@@ -16,7 +16,7 @@ import {
 import { resolveConfig } from "../src/config.js";
 import type { Config } from "../src/config.js";
 import type { ModelProvider } from "../src/model/types.js";
-import { newSession } from "../src/sessions.js";
+import { newSession, saveSession } from "../src/sessions.js";
 
 const SAVED = { ...process.env };
 afterEach(() => {
@@ -82,6 +82,7 @@ function makeCtx(answers: string[] = []): {
     session: newSession(),
     mode: "default",
     usage: { input: 0, output: 0 },
+    todos: [],
     pendingContext: [],
     rebuild() {
       rebuilds++;
@@ -144,6 +145,20 @@ describe("dispatch parsing", () => {
     expect(out).toMatch(/\/profile/);
     expect(out).toMatch(/\/model/);
     expect(out).toMatch(/\/help/);
+  });
+
+  it("shows the current todo list with /todo", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.todos = [
+      { text: "Inspect files", status: "done" },
+      { text: "Add tests", status: "in_progress" },
+    ];
+    await reg.dispatch("/todo", ctx);
+    expect(output()).toContain("Session todo");
+    expect(output()).toContain("[x] Inspect files");
+    expect(output()).toContain("[~] Add tests");
   });
 });
 
@@ -278,6 +293,35 @@ describe("/profile use | rm", () => {
   });
 });
 
+describe("/clear and /resume todo state", () => {
+  it("clears todos when starting a fresh conversation", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const { ctx, state } = makeCtx();
+    state.todos = [{ text: "Keep me?", status: "pending" }];
+    await reg.dispatch("/clear", ctx);
+    expect(state.todos).toEqual([]);
+    expect(state.session.todos).toEqual([]);
+  });
+
+  it("restores todos from a resumed session", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const saved = newSession({ title: "todo session" });
+    saved.messages.push({
+      role: "user",
+      content: [{ type: "text", text: "hello" }],
+    });
+    saved.todos = [{ text: "Resume me", status: "in_progress" }];
+    saveSession(saved);
+
+    const { ctx, state } = makeCtx([saved.id]);
+    await reg.dispatch(`/resume ${saved.id}`, ctx);
+    expect(state.session.id).toBe(saved.id);
+    expect(state.todos).toEqual(saved.todos);
+  });
+});
+
 describe("/clear", () => {
   it("empties history", async () => {
     isolated();
@@ -368,6 +412,7 @@ describe("/rewind", () => {
     // Turn 2 starts at index 2; truncating there keeps turn 1 (indices 0,1).
     expect(state.history).toHaveLength(2);
     expect(state.history[0]!.content).toEqual([{ type: "text", text: "first" }]);
+    expect(state.seedInput).toBe("second");
   });
 
   it("cancels when the picker is dismissed", async () => {
@@ -380,6 +425,16 @@ describe("/rewind", () => {
     await reg.dispatch("/rewind", ctx);
     expect(state.history).toHaveLength(4);
     expect(output()).toMatch(/cancelled/i);
+  });
+
+  it("seeds the rewound user message after a picker selection", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const { ctx, state } = makeCtx(["2"]);
+    seedTurns(state);
+    await reg.dispatch("/rewind", ctx);
+    expect(state.history).toHaveLength(2);
+    expect(state.seedInput).toBe("second");
   });
 });
 

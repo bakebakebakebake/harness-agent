@@ -7,6 +7,9 @@ import type {
 import type { Tool, ToolContext } from "../tools/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { LoopEvent, LoopStopReason, PendingToolCall } from "./types.js";
+import type { TodoItem } from "../todos.js";
+import type { SubagentRunner } from "../subagents.js";
+import type { McpRuntime } from "../mcp/types.js";
 
 /**
  * Agent loop — the ReAct while-loop, written as an async generator (docs/01).
@@ -51,6 +54,15 @@ export interface AgentLoopOptions {
    * control. Threaded into every tool's ToolContext below.
    */
   allowOutsideWorkdir?: boolean;
+  /** Session-scoped todo list, exposed to todo tools only. */
+  todoStore?: {
+    get(): TodoItem[];
+    set(items: TodoItem[]): void;
+  };
+  /** Nested subagent runner, used by the `subagent` tool. */
+  runSubagent?: SubagentRunner;
+  /** MCP runtime for deferred-loading and external tool execution. */
+  mcp?: McpRuntime;
 }
 
 /**
@@ -177,6 +189,15 @@ export async function* runAgentLoop(
       workdir,
       ...(signal ? { signal } : {}),
       ...(allowOutsideWorkdir ? { allowOutsideWorkdir } : {}),
+      registry,
+      ...(opts.runSubagent ? { runSubagent: opts.runSubagent } : {}),
+      ...(opts.mcp ? { mcp: opts.mcp } : {}),
+      ...(opts.todoStore
+        ? {
+            getTodos: () => opts.todoStore!.get(),
+            setTodos: (items: TodoItem[]) => opts.todoStore!.set(items),
+          }
+        : {}),
     };
     const resultBlocks: ContentBlock[] = [];
     for (const c of calls) {

@@ -20,9 +20,10 @@ export function inputBorderTone(firstLine: string, planMode: boolean): BorderTon
 }
 
 /**
- * Inner content width for the frame: the longest content line, floored at
- * `minInner` so an empty/short prompt still shows a real box, and capped at the
- * terminal width minus the border/padding so it never wraps.
+ * Inner content width for the frame. The input box is meant to read as a full
+ * terminal work area, so by default it stretches to the available width
+ * (terminal width minus border/padding), with `minInner` only acting as a
+ * safety floor on very narrow terminals.
  */
 export function frameInnerWidth(
   contentLines: string[],
@@ -31,7 +32,8 @@ export function frameInnerWidth(
 ): number {
   const maxInner = Math.max(8, cols - 4);
   const longest = contentLines.reduce((m, l) => Math.max(m, visibleWidth(l)), 0);
-  return Math.min(maxInner, Math.max(minInner, longest));
+  void longest;
+  return maxInner;
 }
 
 /**

@@ -38,12 +38,14 @@ describe("save/load", () => {
     isolated();
     const s = newSession({ title: "hello", provider: "openai", model: "gpt-4o" });
     s.messages.push(userMsg("first message"));
+    s.todos = [{ text: "Ship glob", status: "in_progress" }];
     saveSession(s);
     const loaded = loadSession(s.id);
     expect(loaded).not.toBeNull();
     expect(loaded!.title).toBe("hello");
     expect(loaded!.provider).toBe("openai");
     expect(loaded!.messages).toHaveLength(1);
+    expect(loaded!.todos).toEqual([{ text: "Ship glob", status: "in_progress" }]);
   });
 
   it("returns null for a missing session", () => {

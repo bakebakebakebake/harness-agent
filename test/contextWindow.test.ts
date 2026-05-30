@@ -9,6 +9,7 @@ describe("contextWindowFor", () => {
     expect(contextWindowFor("claude-sonnet-4-5-20250929")).toBe(200_000);
     expect(contextWindowFor("gpt-4o")).toBe(128_000);
     expect(contextWindowFor("gpt-4o-mini")).toBe(128_000);
+    expect(contextWindowFor("deepseek-v4-flash")).toBe(1_000_000);
     expect(contextWindowFor("deepseek-chat")).toBe(64_000);
     expect(contextWindowFor("gpt-3.5-turbo")).toBe(16_385);
   });
@@ -34,6 +35,7 @@ describe("contextWindowFor", () => {
     expect(contextWindowFor("o1-preview")).toBe(200_000);
     expect(contextWindowFor("gpt-4.1")).toBe(1_000_000);
     expect(contextWindowFor("gpt-5")).toBe(400_000);
+    expect(contextWindowFor("deepseek-v4-chat")).toBe(1_000_000);
     expect(contextWindowFor("deepseek-reasoner")).toBe(64_000);
     expect(contextWindowFor("gemini-2.0-flash")).toBe(1_000_000);
     expect(contextWindowFor("glm-4-plus")).toBe(128_000);

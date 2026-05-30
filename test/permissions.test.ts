@@ -103,6 +103,11 @@ describe("PermissionPolicy — modes (#5)", () => {
     expect(p.actionFor("high")).toBe("deny");
   });
 
+  it("plan mode still allows todo_write because it is low-risk session state", () => {
+    const p = new PermissionPolicy({ mode: "plan" });
+    expect(p.decide(toolOf("todo_write", "low"))).toBe("allow");
+  });
+
   it("acceptEdits auto-allows edits but still confirms bash", () => {
     const p = new PermissionPolicy({ mode: "acceptEdits" });
     expect(p.actionFor("low")).toBe("allow");

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { storeDir } from "./profiles.js";
 import type { Message } from "./model/types.js";
+import type { TodoItem } from "./todos.js";
 
 /**
  * Session persistence (docs/08, feature #6).
@@ -32,6 +33,8 @@ export interface Session {
   /** Provider/model context at save time, for display in /resume. */
   provider?: string;
   model?: string;
+  /** Session-scoped todo list, if any. */
+  todos?: TodoItem[];
   messages: Message[];
 }
 
@@ -69,6 +72,7 @@ export function newSession(opts?: {
     updatedAt: now,
     ...(opts?.provider ? { provider: opts.provider } : {}),
     ...(opts?.model ? { model: opts.model } : {}),
+    todos: [],
     messages: [],
   };
 }
@@ -106,6 +110,7 @@ export function loadSession(id: string): Session | null {
       updatedAt: parsed.updatedAt ?? new Date().toISOString(),
       ...(parsed.provider ? { provider: parsed.provider } : {}),
       ...(parsed.model ? { model: parsed.model } : {}),
+      ...(Array.isArray(parsed.todos) ? { todos: parsed.todos as TodoItem[] } : {}),
       messages: parsed.messages as Message[],
     };
   } catch {

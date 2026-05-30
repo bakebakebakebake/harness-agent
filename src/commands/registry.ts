@@ -3,6 +3,7 @@ import type { ModelProvider } from "../model/types.js";
 import type { Message } from "../model/types.js";
 import type { Session } from "../sessions.js";
 import type { PermissionMode } from "../permissions/policy.js";
+import type { TodoItem } from "../todos.js";
 
 /**
  * Slash-command system (docs/08).
@@ -31,6 +32,8 @@ export interface SessionState {
   mode: PermissionMode;
   /** Approx context usage from the last turn (feature #7). */
   usage: { input: number; output: number };
+  /** Session-scoped todo list shown via /todo and persisted in the session. */
+  todos: TodoItem[];
   /**
    * Context to prepend to the NEXT turn only (B2 Skills): a chosen skill's body
    * is injected here, consumed by cli.ts, then cleared. Kept out of permanent
@@ -43,6 +46,11 @@ export interface SessionState {
    * cli.ts drains this after a command dispatch and feeds it to the agent loop.
    */
   queuedInput?: string;
+  /**
+   * A prompt seed to prefill the NEXT input box without auto-submitting it.
+   * Used by rewind/interrupt flows so the user can edit and resend naturally.
+   */
+  seedInput?: string;
   /**
    * Re-resolve the active profile and rebuild config + provider in place.
    * Called after any command that changes which profile is active or its

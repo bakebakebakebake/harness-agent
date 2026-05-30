@@ -24,7 +24,7 @@ import {
   deriveTitle,
 } from "../sessions.js";
 import type { PermissionMode } from "../permissions/policy.js";
-import type { ThinkingDepth } from "../model/types.js";
+import type { ThinkingDepth, Message } from "../model/types.js";
 import { parseThinkingDepth } from "../config.js";
 import { loadSkills } from "../ext/skills.js";
 import { loadCustomCommandDefs, buildCustomCommands } from "../ext/commands.js";
@@ -35,6 +35,7 @@ import { gitDiff } from "../util/git.js";
 import { contextWindowFor } from "../model/contextWindow.js";
 import { humanTokens } from "../ui/status.js";
 import { bold, cyan, dim, green, yellow, red, symbols } from "../ui/theme.js";
+import { cloneTodos, formatTodoList } from "../todos.js";
 
 /**
  * Built-in slash commands (docs/08).
@@ -76,6 +77,7 @@ const clearCommand: SlashCommand = {
       provider: ctx.state.config.provider,
       model: ctx.state.config.model,
     });
+    ctx.state.todos = [];
     ctx.out(dim("  Conversation cleared."));
     return {};
   },
@@ -224,12 +226,23 @@ const resumeCommand: SlashCommand = {
     ctx.state.history.length = 0;
     ctx.state.history.push(...session.messages);
     ctx.state.session = session;
+    ctx.state.todos = cloneTodos(session.todos ?? []);
     // Immersive re-render: show the resumed conversation as if you'd been in it.
     reprintTranscript(ctx);
     ctx.out(
       dim(`  Resumed "${session.title}" `) +
         dim(`(${session.messages.length} messages, ${shortTime(session.updatedAt)}).`),
     );
+    return {};
+  },
+};
+
+const todoCommand: SlashCommand = {
+  name: "todo",
+  description: "Show the current session todo list",
+  async run(ctx) {
+    ctx.out(bold("  Session todo"));
+    ctx.out("  " + formatTodoList(ctx.state.todos).split("\n").join("\n  "));
     return {};
   },
 };
@@ -369,11 +382,11 @@ const rewindCommand: SlashCommand = {
   description: "Jump back to an earlier turn (truncate later history)",
   async run(ctx, args) {
     // Index every user turn (text messages, not tool_result user messages).
-    const turns: Array<{ index: number; title: string }> = [];
+    const turns: Array<{ index: number; title: string; text: string }> = [];
     ctx.state.history.forEach((m, i) => {
       if (m.role !== "user") return;
-      const hasText = m.content.some((b) => b.type === "text");
-      if (hasText) turns.push({ index: i, title: deriveTitle([m], 60) });
+      const text = userTextOf(m);
+      if (text) turns.push({ index: i, title: deriveTitle([m], 60), text });
     });
 
     if (turns.length === 0) {
@@ -383,6 +396,7 @@ const rewindCommand: SlashCommand = {
 
     const arg = (args[0] ?? "").trim();
     let targetIndex: number | null = null;
+    let targetText = "";
 
     if (!arg && ctx.pick) {
       // Arrow picker of turns, newest-first (B1). The visible re-render is the
@@ -396,6 +410,7 @@ const rewindCommand: SlashCommand = {
         return {};
       }
       targetIndex = Number(choice);
+      targetText = turns.find((t) => t.index === targetIndex)?.text ?? "";
     } else if (!arg) {
       // Non-TTY / no picker: list turns newest-first with a 1-based number.
       const rows = turns.map((t, i) => `  ${i + 1}) ${t.title}`).reverse();
@@ -409,10 +424,12 @@ const rewindCommand: SlashCommand = {
         return {};
       }
       targetIndex = turns[n - 1]!.index;
+      targetText = turns[n - 1]!.text;
     }
 
     // Truncate in place so the loop's shared array reference stays valid.
     ctx.state.history.length = targetIndex;
+    if (targetText) ctx.state.seedInput = targetText;
     ctx.state.save();
     // Immersive re-render: clear the screen and reprint the conversation up to
     // the rewind point, so the screen shows exactly the state you jumped to.
@@ -421,6 +438,14 @@ const rewindCommand: SlashCommand = {
     return {};
   },
 };
+
+function userTextOf(m: Message): string {
+  return m.content
+    .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+}
 
 /** Clear the screen and reprint the conversation (A3 + B5 immersive jump). */
 function reprintTranscript(ctx: CommandContext): void {
@@ -492,6 +517,7 @@ const keysCommand: SlashCommand = {
         row("Ctrl-W", "delete the previous word"),
         row("Ctrl-L", "clear the screen"),
         row("Ctrl-C", "stop the turn (refills your question) · twice to quit"),
+        row("Esc", "abort the turn · double Esc on an empty prompt opens /rewind"),
       ].join("\n"),
     );
     return {};
@@ -858,6 +884,7 @@ const BUILTINS: SlashCommand[] = [
   clearCommand,
   compactCommand,
   diffCommand,
+  todoCommand,
   configCommand,
   usageCommand,
   profilesCommand,

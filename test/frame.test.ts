@@ -26,19 +26,14 @@ describe("inputBorderTone", () => {
 });
 
 describe("frameInnerWidth", () => {
-  it("floors at the minimum for short content", () => {
-    expect(frameInnerWidth(["> "], 80, 24)).toBe(24);
+  it("fills the terminal width for short content", () => {
+    expect(frameInnerWidth(["> "], 80, 24)).toBe(76);
   });
 
-  it("grows to fit the longest line", () => {
+  it("stays capped at the terminal width minus border/padding", () => {
     const long = "x".repeat(40);
-    expect(frameInnerWidth([`> ${long}`], 120, 24)).toBe(42);
-  });
-
-  it("caps at the terminal width minus border/padding", () => {
-    const long = "x".repeat(200);
-    // cols=40 → maxInner = 36
-    expect(frameInnerWidth([long], 40, 24)).toBe(36);
+    expect(frameInnerWidth([`> ${long}`], 120, 24)).toBe(116);
+    expect(frameInnerWidth(["x".repeat(200)], 40, 24)).toBe(36);
   });
 });
 
@@ -53,6 +48,13 @@ describe("frameInput", () => {
     // Every row is the same visible width.
     const widths = new Set(rows.map((r) => r.length));
     expect(widths.size).toBe(1);
+  });
+
+  it("can span the full available width", () => {
+    const rows = frameInput(["> hi"], plain, 76);
+    expect(rows[0]).toBe("╭" + "─".repeat(78) + "╮");
+    expect(rows[1]).toBe("│ > hi" + " ".repeat(72) + " │");
+    expect(rows[2]).toBe("╰" + "─".repeat(78) + "╯");
   });
 
   it("produces one content row per line for multiline buffers", () => {

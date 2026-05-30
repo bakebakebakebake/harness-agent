@@ -14,16 +14,18 @@ class FakeKeys {
   onKey(h: KeyHandler | null): void {
     this.handler = h;
   }
+  raw(str: string | undefined, key: Partial<Key> = {}): void {
+    this.handler?.(str, {
+      name: key.name,
+      sequence: key.sequence ?? str ?? "",
+      ctrl: key.ctrl ?? false,
+      meta: key.meta ?? false,
+      shift: key.shift ?? false,
+    });
+  }
   /** Send one key event to the editor. */
   send(name: string, opts: Partial<Key> = {}): void {
-    const key: Key = {
-      name,
-      sequence: opts.sequence ?? "",
-      ctrl: opts.ctrl ?? false,
-      meta: opts.meta ?? false,
-      shift: opts.shift ?? false,
-    };
-    this.handler?.(opts.sequence, key);
+    this.raw(opts.sequence, { ...opts, name });
   }
   /** Type a literal printable string as one event. */
   type(str: string): void {
@@ -112,5 +114,47 @@ describe("lineEditor seed (#7)", () => {
     keys.type("d");
     keys.send("return");
     expect(await p).toEqual({ kind: "submit", value: "abcd" });
+  });
+});
+
+describe("lineEditor double Esc rewind", () => {
+  it("submits /rewind after two Esc presses on an empty prompt", async () => {
+    const keys = new FakeKeys();
+    const p = run(keys);
+    keys.send("escape");
+    await Promise.resolve();
+    let settled = false;
+    p.then(() => {
+      settled = true;
+    });
+    expect(settled).toBe(false);
+    keys.send("escape");
+    expect(await p).toEqual({ kind: "submit", value: "/rewind" });
+  });
+
+  it("does not trigger rewind when the buffer is non-empty", async () => {
+    const keys = new FakeKeys();
+    const p = run(keys);
+    keys.type("hello");
+    keys.send("escape");
+    keys.send("escape");
+    await Promise.resolve();
+    let settled = false;
+    p.then(() => {
+      settled = true;
+    });
+    expect(settled).toBe(false);
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "hello" });
+  });
+
+  it("still triggers rewind if an empty unnamed key event appears between Esc presses", async () => {
+    const keys = new FakeKeys();
+    const p = run(keys);
+    keys.send("escape");
+    // Some terminals can surface a follow-up event around Esc parsing.
+    keys.raw(undefined, {});
+    keys.send("escape");
+    expect(await p).toEqual({ kind: "submit", value: "/rewind" });
   });
 });

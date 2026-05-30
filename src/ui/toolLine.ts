@@ -11,6 +11,12 @@ import { quoteForDisplay } from "../tools/bash.js";
  * identical whether it's streaming or being reprinted after rewind/resume.
  */
 export function toolCallLine(name: string, input: unknown): string {
+  if (name === "shell") {
+    const obj = (input ?? {}) as { command_line?: unknown };
+    if (typeof obj.command_line === "string" && obj.command_line.trim()) {
+      return obj.command_line;
+    }
+  }
   if (name === "bash") {
     const obj = (input ?? {}) as { command?: unknown; args?: unknown };
     if (typeof obj.command === "string") {
