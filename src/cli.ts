@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { stdout } from "node:process";
 import { resolveConfig, isConfigured, type Config } from "./config.js";
 import { collectOnboarding, applyOnboarding } from "./onboarding.js";
