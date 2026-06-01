@@ -184,6 +184,9 @@ export function profileToConfig(profile: Profile, cwd: string): Config {
     workdir: cwd,
     maxTurns: 50,
     bashTimeoutMs: 120_000,
+    memoryEnabled: true,
+    memoryExtractEvery: 3,
+    memoryInjectionBudget: 3000,
   };
 }
 

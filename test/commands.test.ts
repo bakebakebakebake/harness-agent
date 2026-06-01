@@ -16,7 +16,10 @@ import {
 import { resolveConfig } from "../src/config.js";
 import type { Config } from "../src/config.js";
 import type { ModelProvider } from "../src/model/types.js";
+import { upsertMemoryCard, readMemoryCardFromDb } from "../src/memory/store.js";
+import { appendTranscriptTurn } from "../src/memory/transcript.js";
 import { newSession, saveSession } from "../src/sessions.js";
+import type { MemoryCard } from "../src/memory/types.js";
 
 const SAVED = { ...process.env };
 const realFetch = global.fetch;
@@ -98,7 +101,11 @@ function makeCtx(answers: string[] = []): {
       return 0;
     },
     todos: [],
+    skillCatalog: [],
     pendingContext: [],
+    refreshSkills() {
+      this.skillCatalog = [];
+    },
     rebuild() {
       rebuilds++;
       const next = resolveConfig("/work");
@@ -131,6 +138,33 @@ function makeCtx(answers: string[] = []): {
     state,
     output: () => lines.join("\n"),
     rebuildCalls: () => rebuilds,
+  };
+}
+
+function seedMemory(overrides: Partial<MemoryCard> = {}): MemoryCard {
+  return {
+    id: overrides.id ?? "mem-1",
+    title: overrides.title ?? "Testing flow",
+    scope: overrides.scope ?? "project",
+    kind: overrides.kind ?? "workflow",
+    tier: overrides.tier ?? "archive",
+    summary: overrides.summary ?? "Run typecheck before tests.",
+    body: overrides.body ?? "Always run npm run typecheck before npm test.",
+    tags: overrides.tags ?? ["testing"],
+    entities: overrides.entities ?? ["tsc"],
+    importance: overrides.importance ?? 0.8,
+    trust: overrides.trust ?? 0.9,
+    status: overrides.status ?? "active",
+    supersedes: overrides.supersedes ?? [],
+    sourceSessionId: overrides.sourceSessionId,
+    sourceTurnRefs: overrides.sourceTurnRefs ?? [],
+    sourceKind: overrides.sourceKind ?? "manual",
+    createdAt: overrides.createdAt ?? "2026-05-31T00:00:00.000Z",
+    updatedAt: overrides.updatedAt ?? "2026-05-31T00:00:00.000Z",
+    lastAccessedAt: overrides.lastAccessedAt,
+    accessCount: overrides.accessCount ?? 0,
+    validFrom: overrides.validFrom,
+    validUntil: overrides.validUntil,
   };
 }
 
@@ -188,6 +222,140 @@ describe("dispatch parsing", () => {
     expect(out).toContain("734 in");
     expect(out).toContain("213 out");
     expect(out).toContain("last call");
+  });
+
+  it("shows memory stats and list output", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "memory-cmd-"));
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/remember project Run typecheck before tests", ctx);
+    await reg.dispatch("/memory", ctx);
+    await reg.dispatch("/memory list", ctx);
+    const out = output();
+    expect(out).toContain("Memory");
+    expect(out).toContain("Memory cards");
+    expect(out).toContain("Run typecheck before tests");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("can drive memory actions from the picker", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "memory-cmd-"));
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx(["show", "mem-1"]);
+    state.config.workdir = root;
+    upsertMemoryCard(root, seedMemory({ id: "mem-1", title: "Picker memory" }));
+    await reg.dispatch("/memory", ctx);
+    const out = output();
+    expect(out).toContain("Picker memory");
+    expect(out).toContain("evidence ref");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("searches and shows remembered cards", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "memory-cmd-"));
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/remember user Prefer concise answers", ctx);
+    const remembered = /Remembered user memory ([^.]+)\./.exec(output())?.[1];
+    expect(remembered).toBeTruthy();
+    await reg.dispatch("/memory search concise", ctx);
+    await reg.dispatch(`/memory show ${remembered}`, ctx);
+    const out = output();
+    expect(out).toContain("Prefer concise answers");
+    expect(out).toContain("preference");
+    expect(readMemoryCardFromDb(root, remembered!)?.accessCount).toBe(2);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("refreshes and explains the digest from commands", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "memory-cmd-"));
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config.workdir = root;
+    mkdirSync(join(root, ".agents", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    await reg.dispatch("/remember project Run typecheck before tests", ctx);
+    await reg.dispatch("/memory compact", ctx);
+    await reg.dispatch("/memory diagnose how should I run tests and review this change", ctx);
+    const out = output();
+    expect(out).toContain("Core digest refreshed.");
+    expect(out).toContain("# Core Digest");
+    expect(out).toContain("Memory diagnose:");
+    expect(out).toContain("preferred scope");
+    expect(out).toContain("quality");
+    expect(out).toContain("reasons");
+    expect(out).toContain("related skills");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("shows evidence preview and supersede relationships", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "memory-cmd-"));
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config.workdir = root;
+    appendTranscriptTurn("sess-1", {
+      sessionId: "sess-1",
+      turnIndex: 1,
+      role: "user",
+      text: "Always run typecheck before tests.",
+      createdAt: "2026-05-31T00:00:00.000Z",
+    });
+    upsertMemoryCard(
+      root,
+      seedMemory({
+        id: "old-1",
+        title: "Old testing flow",
+        status: "superseded",
+        sourceSessionId: "sess-1",
+        sourceTurnRefs: ["sess-1:1"],
+      }),
+    );
+    upsertMemoryCard(
+      root,
+      seedMemory({
+        id: "new-1",
+        title: "New testing flow",
+        supersedes: ["old-1"],
+        sourceSessionId: "sess-1",
+        sourceTurnRefs: ["sess-1:1"],
+      }),
+    );
+    await reg.dispatch("/memory show old-1", ctx);
+    const out = output();
+    expect(out).toContain("evidence preview");
+    expect(out).toContain("user[1] Always run typecheck before tests.");
+    expect(out).toContain("superseded by");
+    expect(out).toContain("New testing flow");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("can create and forget memories through pickers", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "memory-cmd-"));
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx([
+      "user",
+      "回答尽量简洁",
+      "Testing flow",
+    ]);
+    state.config.workdir = root;
+    upsertMemoryCard(root, seedMemory({ title: "Testing flow" }));
+    await reg.dispatch("/remember", ctx);
+    await reg.dispatch("/forget", ctx);
+    const out = output();
+    expect(out).toContain("Remembered user memory");
+    expect(out).toContain("Forgot memory");
+    rmSync(root, { recursive: true, force: true });
   });
 });
 
@@ -516,6 +684,7 @@ describe("/skill", () => {
     expect(out).toContain("review");
     expect(out).toContain("code review helper");
     expect(out).toContain("Load with /skill <name>.");
+    expect(out).toContain("skill_load");
     rmSync(root, { recursive: true, force: true });
   });
 

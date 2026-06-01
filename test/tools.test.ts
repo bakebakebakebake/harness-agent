@@ -7,18 +7,34 @@ import { grepTool } from "../src/tools/grep.js";
 import { lsTool } from "../src/tools/ls.js";
 import { globTool } from "../src/tools/glob.js";
 import { todoReadTool, todoWriteTool } from "../src/tools/todo.js";
+import { skillLoadTool } from "../src/tools/skill.js";
+import {
+  memoryDrillTool,
+  memoryForgetTool,
+  memorySearchTool,
+  memoryUpdateTool,
+  memoryWriteTool,
+} from "../src/tools/memory.js";
+import { readMemoryCardFromDb, upsertMemoryCard } from "../src/memory/store.js";
+import { appendTranscriptTurn } from "../src/memory/transcript.js";
 import { defaultRegistry } from "../src/tools/registry.js";
 import { systemPrompt } from "../src/prompt.js";
 import type { TodoItem } from "../src/todos.js";
+import type { MemoryCard } from "../src/memory/types.js";
 
 let dir: string;
+let home: string;
 const ctx = () => ({ workdir: dir });
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "tools-"));
+  home = mkdtempSync(join(tmpdir(), "tools-home-"));
+  process.env.HARNESS_HOME = home;
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+  delete process.env.HARNESS_HOME;
 });
 
 describe("write tool", () => {
@@ -233,25 +249,146 @@ describe("todo tools", () => {
   });
 });
 
+describe("memory tools", () => {
+  it("writes, searches, updates, drills, and forgets memory cards", async () => {
+    appendTranscriptTurn("sess-1", {
+      sessionId: "sess-1",
+      turnIndex: 1,
+      role: "user",
+      text: "Always run npm run typecheck before npm test.",
+      createdAt: "2026-05-31T00:00:00.000Z",
+    });
+    const write = await memoryWriteTool.execute(
+      {
+        title: "Testing preference",
+        scope: "project",
+        kind: "workflow",
+        summary: "Run typecheck before tests.",
+        body: "Always run npm run typecheck before npm test.",
+        tags: ["testing"],
+        sourceSessionId: "sess-1",
+        sourceTurnRefs: ["sess-1:1"],
+      },
+      ctx(),
+    );
+    expect(write.isError).toBe(false);
+    const id = /Wrote memory ([^:]+):/.exec(write.content)?.[1];
+    expect(id).toBeTruthy();
+
+    const search = await memorySearchTool.execute({ query: "typecheck tests" }, ctx());
+    expect(search.isError).toBe(false);
+    expect(search.content).toContain("Testing preference");
+    expect(readMemoryCardFromDb(dir, id!)?.accessCount).toBe(1);
+
+    const update = await memoryUpdateTool.execute(
+      { id, summary: "Run typecheck first.", tags: ["testing", "tsc"] },
+      ctx(),
+    );
+    expect(update.isError).toBe(false);
+
+    upsertMemoryCard(dir, {
+      ...(readMemoryCardFromDb(dir, id!) as MemoryCard),
+      status: "superseded",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+    });
+    upsertMemoryCard(dir, {
+      id: "newer-1",
+      title: "Testing preference v2",
+      scope: "project",
+      kind: "workflow",
+      tier: "archive",
+      summary: "Run typecheck first.",
+      body: "Always run npm run typecheck before npm test.",
+      tags: ["testing", "tsc"],
+      entities: [],
+      importance: 0.8,
+      trust: 0.9,
+      status: "active",
+      supersedes: [id!],
+      sourceSessionId: "sess-1",
+      sourceTurnRefs: ["sess-1:1"],
+      sourceKind: "manual",
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      accessCount: 0,
+    });
+
+    const drill = await memoryDrillTool.execute({ id }, ctx());
+    expect(drill.isError).toBe(false);
+    expect(drill.content).toContain("Run typecheck first.");
+    expect(drill.content).toContain("Superseded by:");
+    expect(drill.content).toContain("Evidence:");
+    expect(readMemoryCardFromDb(dir, id!)?.accessCount).toBe(2);
+
+    const forget = await memoryForgetTool.execute({ id, reason: "outdated" }, ctx());
+    expect(forget.isError).toBe(false);
+    const after = await memoryDrillTool.execute({ id }, ctx());
+    expect(after.content).toContain("forgotten");
+  });
+});
+
 describe("tool registry and prompt", () => {
-  it("registers glob and todo tools by default", () => {
+  it("registers glob, skill, and todo tools by default", () => {
     const names = defaultRegistry({ bashTimeoutMs: 1000 }).list().map((t) => t.name);
     expect(names).toContain("glob");
     expect(names).toContain("todo_read");
     expect(names).toContain("todo_write");
+    expect(names).toContain("skill_load");
+    expect(names).toContain("memory_search");
+    expect(names).toContain("memory_write");
+    expect(names).toContain("memory_update");
+    expect(names).toContain("memory_forget");
+    expect(names).toContain("memory_drill");
     expect(names).toContain("shell");
     expect(names).toContain("subagent");
     expect(names).toContain("mcp_search");
   });
 
-  it("documents glob and todo guidance in the system prompt", () => {
-    const prompt = systemPrompt("/work");
+  it("documents skill, glob, and todo guidance in the system prompt", () => {
+    const prompt = systemPrompt("/work", [
+      "Available skills:",
+      "- review: code review helper (project)",
+    ]);
+    expect(prompt).toContain("- skill_load:");
+    expect(prompt).toContain("- memory_search:");
+    expect(prompt).toContain("- memory_write:");
+    expect(prompt).toContain("- memory_drill:");
     expect(prompt).toContain("- glob:");
     expect(prompt).toContain("- todo_read:");
     expect(prompt).toContain("- shell:");
     expect(prompt).toContain("- subagent:");
     expect(prompt).toContain("- mcp_search:");
+    expect(prompt).toContain("Available skills:");
+    expect(prompt).toContain("review: code review helper");
     expect(prompt).toContain("Prefer glob for finding files");
+    expect(prompt).toContain("Search memory before re-discovering durable project conventions");
     expect(prompt).toContain("create a todo list early");
+  });
+});
+
+describe("skill tool", () => {
+  it("lists available skills when no name is given", async () => {
+    mkdirSync(join(dir, ".agents", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(dir, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    const r = await skillLoadTool.execute({}, ctx());
+    expect(r.isError).toBe(false);
+    expect(r.content).toContain("Available skills:");
+    expect(r.content).toContain("review: code review helper");
+  });
+
+  it("loads a selected skill body by name", async () => {
+    mkdirSync(join(dir, ".agents", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(dir, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    const r = await skillLoadTool.execute({ name: "review" }, ctx());
+    expect(r.isError).toBe(false);
+    expect(r.content).toContain("# Skill: review");
+    expect(r.content).toContain("Review carefully.");
+    expect(r.details).toContain("code review helper");
   });
 });

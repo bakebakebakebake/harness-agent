@@ -105,3 +105,52 @@ export function loadSkills(cwd: string): Map<string, Skill> {
   return skills;
 }
 
+/** Sorted skill list for stable display and prompt injection. */
+export function listSkills(skills: Map<string, Skill>): Skill[] {
+  return [...skills.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function searchSkills(
+  cwd: string,
+  query: string,
+  limit = 3,
+): Skill[] {
+  const terms = query
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}_-]+/u)
+    .map((term) => term.trim())
+    .filter(Boolean);
+  if (terms.length === 0) return [];
+  const scored = listSkills(loadSkills(cwd))
+    .map((skill) => {
+      const haystack = `${skill.name} ${skill.description}`.toLowerCase();
+      let score = 0;
+      for (const term of terms) {
+        if (skill.name.includes(term)) score += 3;
+        else if (haystack.includes(term)) score += 1;
+      }
+      return { skill, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name));
+  return scored.slice(0, limit).map((entry) => entry.skill);
+}
+
+/** Render the catalog lines that should appear in the system prompt. */
+export function formatSkillCatalog(skills: Map<string, Skill>): string[] {
+  const items = listSkills(skills);
+  if (items.length === 0) return [];
+  return [
+    "Available skills:",
+    ...items.map(
+      (skill) =>
+        `- ${skill.name}: ${skill.description || "(no description)"} (${skill.scope})`,
+    ),
+    "- When a listed skill fits the task, call skill_load with its name and use the returned body.",
+  ];
+}
+
+/** Build the body block returned by /skill and skill_load. */
+export function skillContextBlock(skill: Skill): string {
+  return `# Skill: ${skill.name}\n\n${skill.body}`;
+}

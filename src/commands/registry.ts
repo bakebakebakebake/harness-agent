@@ -37,6 +37,8 @@ export interface SessionState {
   estimateContext(): number;
   /** Session-scoped todo list shown via /todo and persisted in the session. */
   todos: TodoItem[];
+  /** Always-on skill name/description catalog injected into the system prompt. */
+  skillCatalog: string[];
   /**
    * Context to prepend to the NEXT turn only (B2 Skills): a chosen skill's body
    * is injected here, consumed by cli.ts, then cleared. Kept out of permanent
@@ -64,6 +66,8 @@ export interface SessionState {
   save(): void;
   /** Switch the permission mode live (updates state + the live policy). */
   setMode(mode: PermissionMode): void;
+  /** Re-scan skills and refresh the cached prompt catalog. */
+  refreshSkills(): void;
 }
 
 /** Everything a command needs to do its job. */

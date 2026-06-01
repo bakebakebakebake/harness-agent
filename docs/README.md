@@ -6,6 +6,9 @@
 
 这是一份**原创的架构设计笔记**,系统整理了"Claude Code 式编码 agent"的核心设计思路,供本项目(Harness-Agent)日后构建时查找学习。
 
+这份文档更适合当作**架构参考与学习顺序**来读。它不等于 Harness-Agent 当前版本
+的功能清单,也不等于实时 roadmap。
+
 内容来源:
 - 官方公开文档、官方开源的 Agent SDK、官方工程博客
 - Agent 领域的**通用设计模式**
@@ -47,6 +50,7 @@
 | [09 · 可扩展性](09-extensibility.md) | 扩展生态 | Hooks→Skills→Plugins→MCP 按成本分层、三个注入点 |
 | [10 · 执行环境与沙箱](10-execution-environment.md) | 隔离机制 | 文件/网络边界、Bash 笼子、参数化防注入、隔离强度分层 |
 | [11 · 可观测性、评估与验证](11-observability-eval.md) | 可靠性 | 结构化日志/成本追踪、eval 数据集/回归、改完跑 build/test |
+| [12 · 原生记忆系统](12-memory-system.md) | 长期记忆 | transcript 证据、Markdown cards、SQLite 索引、core digest、预算感知注入 |
 
 ## 五条最值得记住的总原则
 
@@ -60,7 +64,10 @@
 
 5. **提示词驱动,而非硬编码。** 行为/工具/安全规则写进 system prompt,可调、可审计;同一循环 + 不同提示词 = 不同 agent。
 
-## 建议的下一步(动手)
+## 建议的学习 / 搭建顺序
+
+下面这条路径是“如果你想自己搭一遍 Agent,建议怎么走”。它是阅读顺序和实现顺序,
+不是在描述 Harness-Agent 当前还有哪些功能没做。
 
 读文档不如写一遍。推荐路径,由内核向外逐层加:
 1. 用 ~80 行写一个最小 agent loop(Read / Edit / Bash 三个工具),验证 [01](01-agent-loop.md)。

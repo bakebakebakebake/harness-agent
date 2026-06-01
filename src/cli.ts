@@ -18,11 +18,12 @@ import { beside, mascot, mascotTagline } from "./ui/mascot.js";
 import { InterruptController } from "./ui/interrupt.js";
 import { LineReader } from "./ui/input.js";
 import { renderTranscript } from "./ui/transcript.js";
-import { systemPrompt } from "./prompt.js";
+import { appendPromptBlocks, systemPrompt } from "./prompt.js";
 import { buildRegistry } from "./commands/builtins.js";
 import { loadStore, storePath } from "./profiles.js";
 import { newSession, saveSession, deriveTitle } from "./sessions.js";
 import { loadCustomCommandDefs, buildCustomCommands } from "./ext/commands.js";
+import { loadSkills, formatSkillCatalog } from "./ext/skills.js";
 import { searchFiles } from "./ext/fileSearch.js";
 import { runShell } from "./util/shell.js";
 import { gitBranchCached } from "./util/git.js";
@@ -34,6 +35,10 @@ import type { SubagentRequest, SubagentResult } from "./subagents.js";
 import { LocalMcpRuntime } from "./mcp/runtime.js";
 import { estimateContextTokens } from "./model/contextEstimate.js";
 import { formatContextPercent } from "./ui/status.js";
+import { formatMemoryContext, retrieveMemoryContext } from "./memory/retrieve.js";
+import { appendTranscriptMessages, readTranscriptTurns } from "./memory/transcript.js";
+import { extractAndApplyMemory } from "./memory/extract.js";
+import { writeCoreDigest } from "./memory/digest.js";
 
 /**
  * CLI entry — the REPL that wires every module together (docs/01, docs/08).
@@ -115,6 +120,7 @@ async function main(): Promise<void> {
   const registry = defaultRegistry({ bashTimeoutMs: config.bashTimeoutMs });
   const mcp = new LocalMcpRuntime(config.workdir);
   const policy = new PermissionPolicy();
+  let skillCatalog = formatSkillCatalog(loadSkills(config.workdir));
 
   // Session state with a mutable provider/config: slash commands can switch the
   // active profile and rebuild() the provider in place — no restart needed.
@@ -126,11 +132,12 @@ async function main(): Promise<void> {
     session: newSession({ provider: config.provider, model: config.model }),
     mode: policy.getMode(),
     usage: { input: 0, output: 0 },
+    skillCatalog,
     estimateContext() {
-      const extraContext = this.pendingContext.join("\n\n");
-      const system = extraContext
-        ? systemPrompt(this.config.workdir) + "\n\n" + extraContext
-        : systemPrompt(this.config.workdir);
+      const system = appendPromptBlocks(
+        systemPrompt(this.config.workdir, this.skillCatalog),
+        this.pendingContext,
+      );
       return estimateContextTokens({
         system,
         messages: this.history,
@@ -139,12 +146,17 @@ async function main(): Promise<void> {
     },
     todos: [],
     pendingContext: [],
+    refreshSkills() {
+      skillCatalog = formatSkillCatalog(loadSkills(this.config.workdir));
+      this.skillCatalog = skillCatalog;
+    },
     rebuild() {
       const next = resolveConfig();
       if (!next) return;
       this.config = next;
       this.provider = createProvider(next);
       this.profileName = loadStore().activeProfile;
+      this.refreshSkills();
       printBanner(this.config, this.profileName);
     },
     save() {
@@ -225,16 +237,28 @@ async function main(): Promise<void> {
     let summary = "";
     let doneReason: LoopStopReason | null = null;
     let turns = 0;
-    const system = [
-      systemPrompt(state.config.workdir),
-      "",
-      "You are running as an isolated subagent.",
-      "Focus only on the assigned subtask, keep the parent context small, and",
-      "finish with a concise summary of what matters.",
-    ].join("\n");
     const userInput = request.instructions?.trim()
       ? `${request.task}\n\nAdditional instructions:\n${request.instructions}`
       : request.task;
+    const memoryBlock = state.config.memoryEnabled
+      ? formatMemoryContext(
+          retrieveMemoryContext({
+            cwd: state.config.workdir,
+            query: userInput,
+            budget: state.config.memoryInjectionBudget,
+          }),
+        )
+      : "";
+    const system = appendPromptBlocks(
+      [
+        systemPrompt(state.config.workdir, state.skillCatalog),
+        "",
+        "You are running as an isolated subagent.",
+        "Focus only on the assigned subtask, keep the parent context small, and",
+        "finish with a concise summary of what matters.",
+      ].join("\n"),
+      [memoryBlock],
+    );
 
     for await (const ev of runAgentLoop({
       provider: state.provider,
@@ -359,14 +383,25 @@ async function main(): Promise<void> {
       () => interrupt.abort(),
       () => interrupt.abort(),
     );
+    const historyBefore = state.history.length;
 
     // Drain any pending skill context into the system prompt for THIS turn only
     // (B2 progressive disclosure). Untrusted data — never bypasses the gate.
-    const extraContext = state.pendingContext.join("\n\n");
+    const memoryBlock = state.config.memoryEnabled
+      ? formatMemoryContext(
+          retrieveMemoryContext({
+            cwd: state.config.workdir,
+            query: input,
+            budget: state.config.memoryInjectionBudget,
+          }),
+        )
+      : "";
+    const extraContext = state.pendingContext;
     state.pendingContext = [];
-    const system = extraContext
-      ? systemPrompt(state.config.workdir) + "\n\n" + extraContext
-      : systemPrompt(state.config.workdir);
+    const system = appendPromptBlocks(
+      systemPrompt(state.config.workdir, state.skillCatalog),
+      [memoryBlock, ...extraContext],
+    );
 
     try {
       for await (const ev of runAgentLoop({
@@ -406,7 +441,20 @@ async function main(): Promise<void> {
       stdout.write(dim("  Interrupted — your question is back in the prompt.\n"));
     }
     // Auto-save the conversation after each turn so it can be resumed later.
+    appendTranscriptMessages(state.session.id, state.history.slice(historyBefore));
     state.save();
+
+    if (state.config.memoryEnabled) {
+      const transcript = readTranscriptTurns(state.session.id);
+      const userTurns = transcript.filter((turn) => turn.role === "user").length;
+      if (userTurns > 0 && userTurns % state.config.memoryExtractEvery === 0) {
+        extractAndApplyMemory(
+          state.config.workdir,
+          transcript.slice(-Math.max(4, state.config.memoryExtractEvery * 4)),
+        );
+        writeCoreDigest(state.config.workdir);
+      }
+    }
 
     // Auto-compact when the live prompt estimate nears the context threshold.
     // Runs the same machinery as /compact, then reprints so the shorter state
@@ -422,7 +470,14 @@ async function main(): Promise<void> {
 
 /** Fraction of the context window at which auto-compaction kicks in (#1). */
 const COMPACT_THRESHOLD = 0.85;
-const DEFAULT_SUBAGENT_TOOLS = ["read", "ls", "grep", "glob", "todo_read"] as const;
+const DEFAULT_SUBAGENT_TOOLS = [
+  "read",
+  "ls",
+  "grep",
+  "glob",
+  "todo_read",
+  "skill_load",
+] as const;
 
 /**
  * If the live prompt estimate crosses COMPACT_THRESHOLD of the model's context

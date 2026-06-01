@@ -38,6 +38,26 @@ export function parseContextWindow(value: string | undefined): number | undefine
   return tokens > 0 ? tokens : undefined;
 }
 
+export function parseBoolFlag(
+  value: string | undefined,
+  fallback: boolean,
+): boolean {
+  const raw = (value ?? "").trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  return fallback;
+}
+
+export function parsePositiveInt(
+  value: string | undefined,
+): number | undefined {
+  const raw = (value ?? "").trim();
+  if (!raw) return undefined;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
 /**
  * Minimal .env loader — keeps us dependency-free.
  * Only sets keys that aren't already present in process.env.
@@ -87,6 +107,12 @@ export interface Config {
   maxTurns: number;
   /** Per-command timeout for the Bash tool in ms (see docs/10). */
   bashTimeoutMs: number;
+  /** Enable the native memory subsystem. */
+  memoryEnabled: boolean;
+  /** Turn cadence for automatic durable-memory extraction. */
+  memoryExtractEvery: number;
+  /** Prompt budget reserved for injected memory context. */
+  memoryInjectionBudget: number;
 }
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
@@ -233,6 +259,10 @@ export function loadConfig(cwd: string = process.cwd()): Config {
     workdir: cwd,
     maxTurns: 50,
     bashTimeoutMs: 120_000,
+    memoryEnabled: parseBoolFlag(process.env.HARNESS_MEMORY_ENABLED, true),
+    memoryExtractEvery: parsePositiveInt(process.env.HARNESS_MEMORY_EXTRACT_EVERY) ?? 3,
+    memoryInjectionBudget:
+      parsePositiveInt(process.env.HARNESS_MEMORY_INJECTION_BUDGET) ?? 3000,
     ...(process.env.HARNESS_THINKING
       ? { thinkingDepth: parseThinkingDepth(process.env.HARNESS_THINKING) }
       : {}),

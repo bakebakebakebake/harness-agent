@@ -5,6 +5,7 @@ A local-first coding agent CLI with:
 - interactive slash-command menus
 - editable multi-line input
 - session resume and rewind
+- native project/user memory
 - todo tracking
 - shell, subagent, and MCP support
 
@@ -27,12 +28,18 @@ Then run:
 harness-agent
 ```
 
+Or run without installing first:
+
+```bash
+npx harness-agent
+```
+
 ### From a GitHub release tarball
 
 If you want to install a specific release directly:
 
 ```bash
-npm install -g https://github.com/bakebakebakebake/harness-agent/releases/download/v0.3.1/harness-agent-0.3.1.tgz
+npm install -g https://github.com/bakebakebakebake/harness-agent/releases/download/v0.3.2/harness-agent-0.3.2.tgz
 ```
 
 ## First Run
@@ -61,6 +68,9 @@ harness-agent
 Useful commands inside the app:
 
 - `/help`
+- `/memory`
+- `/remember`
+- `/forget`
 - `/profile`
 - `/model`
 - `/mode`
@@ -70,10 +80,48 @@ Useful commands inside the app:
 - `/mcp`
 - `/usage`
 
+## Memory
+
+Harness-Agent now includes a native memory system with:
+
+- file-backed memory cards
+- session transcript evidence
+- a local SQLite index for retrieval
+- a derived core digest that stays small enough for stable injection
+- automatic pre-turn memory injection
+- access tracking so frequently used memories rise into the digest over time
+- conservative durable-memory extraction for both English and common Chinese instructions
+
+Storage layout:
+
+- project memory: `<workdir>/.agents/memory/project/*.md`
+- user memory: `~/.harness-agent/memory/user/*.md`
+- index: `~/.harness-agent/memory/index.sqlite`
+- transcripts: `~/.harness-agent/memory/transcripts/<session-id>.jsonl`
+- digests: `~/.harness-agent/memory/digests/<hash>.md`
+
+Useful memory commands:
+
+- `/memory`
+- `/memory list`
+- `/memory search <query>`
+- `/memory show <id>` for evidence preview and relationship overview
+- `/memory rebuild`
+- `/memory compact`
+- `/memory diagnose <query>`
+- `/remember [project|user] <text>`
+- `/forget <id>`
+
+In TTY mode, `/memory`, `/remember`, and `/forget` also support picker-driven flows so you usually do not need to type the full subcommand or memory id by hand.
+
+If you want a full example-driven walkthrough, see:
+
+- [docs/12-memory-system.md](docs/12-memory-system.md)
+
 ## Release Notes
 
 - Releases are published on GitHub under the repository Releases page.
-- npm publishing is configured for public release.
+- npm publishing is configured for public release and `harness-agent` can be installed directly from npm.
 
 ## License
 

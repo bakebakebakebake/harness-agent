@@ -8,10 +8,18 @@ import { grepTool } from "./grep.js";
 import { lsTool } from "./ls.js";
 import { globTool } from "./glob.js";
 import { todoReadTool, todoWriteTool } from "./todo.js";
+import { skillLoadTool } from "./skill.js";
 import { createShellTool } from "./shell.js";
 import { createSubagentTool } from "./subagent.js";
 import { mcpSearchTool } from "./mcp.js";
 import { createBashTool } from "./bash.js";
+import {
+  memorySearchTool,
+  memoryWriteTool,
+  memoryUpdateTool,
+  memoryForgetTool,
+  memoryDrillTool,
+} from "./memory.js";
 
 /**
  * Tool registry — assembles the active tool pool (docs/02).
@@ -57,6 +65,12 @@ export function defaultRegistry(opts: { bashTimeoutMs: number }): ToolRegistry {
     globTool,
     todoReadTool,
     todoWriteTool,
+    skillLoadTool,
+    memorySearchTool,
+    memoryWriteTool,
+    memoryUpdateTool,
+    memoryForgetTool,
+    memoryDrillTool,
     createShellTool({ defaultTimeoutMs: opts.bashTimeoutMs }),
     createSubagentTool(),
     mcpSearchTool,
