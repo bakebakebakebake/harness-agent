@@ -7,7 +7,7 @@
 
 ## 1. 项目概览
 
-- **名称**:`harness-agent`(`package.json` version `0.3.2`,已公开发布到 npm)。
+- **名称**:`harness-agent`(`package.json` version `0.4.0`,已公开发布到 npm)。
 - **定位**:一个**本地优先的命令行编码 Agent**(Claude Code 式),在本仓库的
   `docs/` 架构参考基础上逐步实现。
 - **入口**:`src/cli.ts`(交互式 REPL);构建后 `bin: harness-agent → dist/cli.js`。

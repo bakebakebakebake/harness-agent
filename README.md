@@ -41,7 +41,7 @@ npx harness-agent
 If you want to install a specific release directly:
 
 ```bash
-npm install -g https://github.com/bakebakebakebake/harness-agent/releases/download/v0.3.2/harness-agent-0.3.2.tgz
+npm install -g https://github.com/bakebakebakebake/harness-agent/releases/download/v0.4.0/harness-agent-0.4.0.tgz
 ```
 
 ## First Run
