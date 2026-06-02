@@ -1,6 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { McpCallResult, McpRuntime, McpSearchOptions, McpToolCandidate } from "./types.js";
+import type {
+  McpCallResult,
+  McpRuntime,
+  McpSearchOptions,
+  McpServerStatus,
+  McpToolCandidate,
+} from "./types.js";
 import { loadMcpServerDefinitions, type McpServerDefinition } from "../ext/mcp.js";
 
 function sanitizeName(value: string): string {
@@ -79,6 +85,7 @@ function scoreMatch(query: string, candidate: McpToolCandidate): number {
 class ServerConnection {
   private toolsCache: McpToolCandidate[] | null = null;
   private transport: StdioClientTransport | null = null;
+  private connected = false;
 
   constructor(private readonly def: McpServerDefinition, private readonly workdir: string) {}
 
@@ -98,6 +105,7 @@ class ServerConnection {
     this.transport = transport;
     this.client = new Client({ name: "harness-agent", version: "0.2.0" });
     await this.client.connect(transport);
+    this.connected = true;
     return this.client;
   }
 
@@ -162,6 +170,14 @@ class ServerConnection {
     } catch {
       /* ignore close errors */
     }
+    this.connected = false;
+  }
+
+  status(): Pick<McpServerStatus, "connected" | "loadedTools"> {
+    return {
+      connected: this.connected,
+      loadedTools: this.toolsCache?.length ?? 0,
+    };
   }
 }
 
@@ -174,15 +190,37 @@ class ServerConnection {
  */
 export class LocalMcpRuntime implements McpRuntime {
   private readonly servers = new Map<string, ServerConnection>();
+  private defs = new Map<string, McpServerDefinition>();
 
   constructor(private readonly cwd: string) {}
 
   private refreshServers(): void {
     for (const def of loadMcpServerDefinitions(this.cwd)) {
+      this.defs.set(def.name, def);
       if (!this.servers.has(def.name)) {
         this.servers.set(def.name, new ServerConnection(def, this.cwd));
       }
     }
+  }
+
+  status(): McpServerStatus[] {
+    this.refreshServers();
+    return [...this.defs.values()]
+      .map((def) => {
+        const runtime = this.servers.get(def.name);
+        const status = runtime?.status() ?? { connected: false, loadedTools: 0 };
+        return {
+          name: def.name,
+          scope: def.scope,
+          command: def.command,
+          args: def.args ?? [],
+          description: def.description,
+          configured: true,
+          connected: status.connected,
+          loadedTools: status.loadedTools,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async search(

@@ -1,6 +1,8 @@
 import type { Tool, ToolContext } from "../tools/types.js";
 import type { GateDecision, PermissionGate } from "../loop/agentLoop.js";
 import { PermissionPolicy } from "./policy.js";
+import type { RepoAgentConfig } from "../ext/repoConfig.js";
+import { protectedActionFor } from "./protect.js";
 
 /**
  * Confirmation flow + permission gate (docs/04, docs/08).
@@ -48,10 +50,24 @@ export function createGate(opts: {
   confirmer: Confirmer;
   workdir: string;
   notify?: Notifier;
+  repoConfig?: () => RepoAgentConfig;
 }): PermissionGate {
-  const { policy, confirmer, workdir, notify } = opts;
+  const { policy, confirmer, workdir, notify, repoConfig } = opts;
 
   return async ({ tool, input }): Promise<GateDecision> => {
+    const config = repoConfig?.();
+    if (config) {
+      const blocked = protectedActionFor(tool, input, workdir, config);
+      if (blocked) {
+        return {
+          allow: false,
+          reason:
+            `this action is blocked by the repo protection rules (${blocked.reason}). ` +
+            "Do not retry it unless the user changes /protect settings.",
+        };
+      }
+    }
+
     const action = policy.decide(tool);
     const preview = describe(tool, input, workdir);
 

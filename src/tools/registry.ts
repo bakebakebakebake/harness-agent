@@ -13,6 +13,7 @@ import { createShellTool } from "./shell.js";
 import { createSubagentTool } from "./subagent.js";
 import { mcpSearchTool } from "./mcp.js";
 import { createBashTool } from "./bash.js";
+import { webFetchTool, webSearchTool } from "./web.js";
 import {
   memorySearchTool,
   memoryWriteTool,
@@ -71,6 +72,8 @@ export function defaultRegistry(opts: { bashTimeoutMs: number }): ToolRegistry {
     memoryUpdateTool,
     memoryForgetTool,
     memoryDrillTool,
+    webSearchTool,
+    webFetchTool,
     createShellTool({ defaultTimeoutMs: opts.bashTimeoutMs }),
     createSubagentTool(),
     mcpSearchTool,

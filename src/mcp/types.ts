@@ -18,6 +18,17 @@ export interface McpCallResult {
   details?: string;
 }
 
+export interface McpServerStatus {
+  name: string;
+  scope: "user" | "project";
+  command: string;
+  args: string[];
+  description?: string;
+  configured: boolean;
+  connected: boolean;
+  loadedTools: number;
+}
+
 /** Minimal runtime surface the `mcp_search` tool needs. */
 export interface McpRuntime {
   search(query: string, opts?: McpSearchOptions): Promise<McpToolCandidate[]>;
@@ -26,4 +37,5 @@ export interface McpRuntime {
     input: unknown,
     signal?: AbortSignal,
   ): Promise<McpCallResult>;
+  status(): McpServerStatus[];
 }

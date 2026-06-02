@@ -42,7 +42,7 @@ function normalize(text: string): string {
   return text.toLowerCase().trim();
 }
 
-/** Lightweight fuzzy match: query chars must appear in order. */
+/** Lightweight subsequence score: query chars must appear in order. */
 export function fuzzyScore(text: string, query: string): number | null {
   const hay = normalize(text);
   const needle = normalize(query);
@@ -66,14 +66,49 @@ export function fuzzyScore(text: string, query: string): number | null {
   return score;
 }
 
-export function matchesMenuRow(item: MenuRow, query: string): boolean {
+function boundaryIndex(text: string, query: string): number {
+  const idx = text.indexOf(query);
+  if (idx <= 0) return idx;
+  const prev = text[idx - 1] ?? "";
+  return /[-_/.\s]/.test(prev) ? idx : -1;
+}
+
+function fieldScore(text: string, query: string, baseWeight: number): number | null {
+  const hay = normalize(text);
   const needle = normalize(query);
-  if (!needle) return true;
-  const haystacks = [item.label, item.hint ?? ""];
+  if (!hay || !needle) return null;
+  if (hay === needle) return baseWeight + 6000;
+  if (hay.startsWith(needle)) return baseWeight + 5000 - Math.max(0, hay.length - needle.length);
+  const boundary = boundaryIndex(hay, needle);
+  if (boundary >= 0) return baseWeight + 4200 - boundary * 8;
+  const idx = hay.indexOf(needle);
+  if (idx >= 0) return baseWeight + 3000 - idx * 4;
+  const fuzzy = fuzzyScore(hay, needle);
+  return fuzzy === null ? null : baseWeight + 1200 + fuzzy;
+}
+
+function rowTermScore(item: MenuRow, term: string): number | null {
+  const label = fieldScore(item.label, term, 1000);
+  const hint = fieldScore(item.hint ?? "", term, 0);
+  if (label === null && hint === null) return null;
+  return Math.max(label ?? -Infinity, hint ?? -Infinity);
+}
+
+export function scoreMenuRow(item: MenuRow, query: string): number | null {
+  const needle = normalize(query);
+  if (!needle) return 0;
   const terms = needle.split(/\s+/).filter(Boolean);
-  return terms.every((term) =>
-    haystacks.some((hay) => fuzzyScore(hay, term) !== null),
-  );
+  let total = 0;
+  for (const term of terms) {
+    const score = rowTermScore(item, term);
+    if (score === null) return null;
+    total += score;
+  }
+  return total;
+}
+
+export function matchesMenuRow(item: MenuRow, query: string): boolean {
+  return scoreMenuRow(item, query) !== null;
 }
 
 /** Filter menu rows while preserving group headings with matching children only. */
@@ -84,20 +119,30 @@ export function filterMenuRows(items: MenuRow[], query: string): MenuRow[] {
   const out: MenuRow[] = [];
   let pendingGroup: MenuRow | null = null;
   let emittedGroup = false;
+  let groupMatches: Array<{ row: MenuRow; score: number }> = [];
+
+  const flushGroup = (): void => {
+    if (groupMatches.length === 0) return;
+    if (pendingGroup) out.push(pendingGroup);
+    groupMatches
+      .sort((a, b) => b.score - a.score || a.row.label.localeCompare(b.row.label))
+      .forEach((entry) => out.push(entry.row));
+    groupMatches = [];
+  };
 
   for (const item of items) {
     if (item.selectable === false) {
+      flushGroup();
       pendingGroup = item;
       emittedGroup = false;
       continue;
     }
-    if (!matchesMenuRow(item, needle)) continue;
-    if (pendingGroup && !emittedGroup) {
-      out.push(pendingGroup);
-      emittedGroup = true;
-    }
-    out.push(item);
+    const score = scoreMenuRow(item, needle);
+    if (score === null) continue;
+    emittedGroup = true;
+    groupMatches.push({ row: item, score });
   }
+  if (emittedGroup) flushGroup();
   return out;
 }
 
@@ -151,11 +196,11 @@ export function renderMenu(
   }
   const hiddenAbove = start;
   const hiddenBelow = Math.max(0, items.length - end);
-  const footerParts: string[] = [];
-  if (hiddenAbove > 0) footerParts.push(`↑ ${hiddenAbove} earlier`);
-  if (hiddenBelow > 0) footerParts.push(`↓ ${hiddenBelow} more`);
-  if (footerParts.length > 0) {
-    rows.push(gray(truncatePlain(`    ${footerParts.join("  ·  ")}`, maxWidth)));
+  if (hiddenAbove > 0) {
+    rows.unshift(gray(truncatePlain(`    ↑ ${hiddenAbove} earlier`, maxWidth)));
+  }
+  if (hiddenBelow > 0) {
+    rows.push(gray(truncatePlain(`    ↓ ${hiddenBelow} more`, maxWidth)));
   }
   return { rows };
 }

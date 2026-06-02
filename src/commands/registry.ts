@@ -5,6 +5,8 @@ import type { Session } from "../sessions.js";
 import type { PermissionMode } from "../permissions/policy.js";
 import type { TodoItem } from "../todos.js";
 import { fuzzyScore } from "../ui/menu.js";
+import { logger } from "../util/logger.js";
+import type { McpServerStatus } from "../mcp/types.js";
 
 /**
  * Slash-command system (docs/08).
@@ -46,6 +48,8 @@ export interface SessionState {
    * disclosure). Treated as untrusted data, same as any tool output.
    */
   pendingContext: string[];
+  /** Human-visible labels for next-turn context, e.g. selected skills. */
+  pendingContextLabels: string[];
   /**
    * A prompt queued by a custom command to run as the next turn's input (B2).
    * cli.ts drains this after a command dispatch and feeds it to the agent loop.
@@ -86,6 +90,8 @@ export interface CommandContext {
   pick?(prompt: string, items: PickItem[]): Promise<string | null>;
   /** Clear the screen (B5 immersive rewind/resume). Optional for the same reason. */
   clear?(): void;
+  /** Current MCP server status snapshot for /mcp and badge rendering. */
+  mcpStatus?(): McpServerStatus[];
 }
 
 /** A selectable item for the `pick` helper. */
@@ -111,9 +117,75 @@ export interface SlashCommand {
   name: string;
   aliases?: string[];
   description: string;
+  /** Extra search terms for the live slash menu. */
+  keywords?: string[];
+  /** Relative menu priority for empty-slash and tie-break ordering. */
+  priority?: number;
+  /** Dangerous commands are de-emphasized unless explicitly targeted. */
+  dangerous?: boolean;
   /** Known subcommands (e.g. /profile use|new|edit|rm) — used for Tab completion. */
   subcommands?: string[];
   run(ctx: CommandContext, args: string[]): Promise<CommandResult>;
+}
+
+interface RankedCommand {
+  command: SlashCommand;
+  score: number;
+  exact: boolean;
+}
+
+function normalize(text: string): string {
+  return text.toLowerCase().trim();
+}
+
+function boundaryScore(text: string, query: string): number {
+  const idx = text.indexOf(query);
+  if (idx === -1) return 0;
+  const prev = idx === 0 ? "" : text[idx - 1] ?? "";
+  return idx === 0 || /[-_/.\s]/.test(prev) ? 1 : 0;
+}
+
+function fieldScore(text: string, raw: string): number | null {
+  const hay = normalize(text);
+  const query = normalize(raw);
+  if (!hay || !query) return null;
+  if (hay === query) return 5000;
+  if (hay.startsWith(query)) return 4200 - Math.max(0, hay.length - query.length);
+  const wordBoundary = boundaryScore(hay, query);
+  if (wordBoundary > 0) return 3600 - hay.indexOf(query) * 8;
+  const idx = hay.indexOf(query);
+  if (idx >= 0) return 2800 - idx * 4;
+  const fuzzy = fuzzyScore(hay, query);
+  if (fuzzy === null) return null;
+  return 1600 + fuzzy;
+}
+
+function commandRank(command: SlashCommand, raw: string): RankedCommand | null {
+  const query = normalize(raw);
+  if (!query) {
+    const score =
+      (command.priority ?? 0) +
+      (command.dangerous ? -400 : 0) +
+      (command.name === "help" ? 40 : 0);
+    return { command, score, exact: false };
+  }
+
+  const names = [command.name, ...(command.aliases ?? [])];
+  const keywordScore = Math.max(
+    ...[...(command.keywords ?? []), ...names].map((value) => fieldScore(value, query) ?? -Infinity),
+  );
+  const nameScore = Math.max(...names.map((value) => fieldScore(value, query) ?? -Infinity));
+  const descScore = fieldScore(command.description, query) ?? -Infinity;
+  const best = Math.max(nameScore, keywordScore - 250, descScore - 800);
+  if (!Number.isFinite(best)) return null;
+
+  const exact = names.some((value) => normalize(value) === query);
+  const prefix = names.some((value) => normalize(value).startsWith(query));
+  let score = best + (command.priority ?? 0);
+  if (exact) score += 8000;
+  else if (prefix) score += 1600;
+  if (command.dangerous && !exact && !prefix) score -= 2400;
+  return { command, score, exact };
 }
 
 /** A registry of commands, indexed by name and alias. */
@@ -203,12 +275,19 @@ export class CommandRegistry {
     if (!line.startsWith("/")) return null;
     const raw = line.slice(1);
     if (/\s/.test(raw)) return null; // past the command name → no menu
-    const matches = this.ordered.filter((c) => {
-      if (!raw) return true;
-      return (
-        fuzzyScore(c.name, raw) !== null ||
-        fuzzyScore(c.description, raw) !== null
-      );
+    const matches = this.ordered
+      .map((command) => commandRank(command, raw))
+      .filter((entry): entry is RankedCommand => entry !== null)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          Number(b.exact) - Number(a.exact) ||
+          a.command.name.localeCompare(b.command.name),
+      )
+      .map((entry) => entry.command);
+    logger.debug("slash menu ranked", {
+      query: raw,
+      results: matches.slice(0, 6).map((cmd) => cmd.name),
     });
     if (matches.length === 0) return null;
     return matches.map((c) => ({

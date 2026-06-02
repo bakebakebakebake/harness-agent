@@ -224,6 +224,51 @@ describe("lineEditor slash menu enter", () => {
   });
 });
 
+describe("lineEditor file menu sync", () => {
+  it("closes a token menu after the cursor moves before the @ token", async () => {
+    const keys = new FakeKeys();
+    const p = run(keys, {
+      fileMenu: (query: string) =>
+        query
+          ? [{ label: "src/app.ts", value: "src/app.ts", hint: "app entry" }]
+          : null,
+    });
+    keys.type("say @abc");
+    keys.send("left");
+    keys.send("left");
+    keys.send("left");
+    keys.send("left");
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "say @abc" });
+  });
+
+  it("opens the token menu after a bracketed paste inserts an @ token", async () => {
+    const chunks: string[] = [];
+    writeSpy.mockImplementation(((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const keys = new TtyKeys();
+    const p = run(keys, {
+      fileMenu: (query: string) =>
+        query
+          ? [{ label: "src/app.ts", value: "src/app.ts", hint: "app entry" }]
+          : null,
+    });
+
+    chunks.length = 0;
+    keys.pasting = true;
+    keys.type("@abc");
+    keys.pasting = false;
+    expect(chunks.join("")).toContain("src/app.ts");
+
+    keys.send("return");
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "src/app.ts " });
+  });
+});
+
 describe("lineEditor render views", () => {
   it("builds a frame view with menu rows and footer rows", () => {
     const view = buildRenderView({
@@ -233,6 +278,7 @@ describe("lineEditor render views", () => {
       col: 4,
       mode: "menu",
       cols: 80,
+      badges: ["skill:review"],
       menuItems: [
         { label: "Profiles", value: "__profiles__", selectable: false, tone: "dim" },
         { label: "/profile", value: "/profile", hint: "manage profiles", tone: "green" },
@@ -248,6 +294,19 @@ describe("lineEditor render views", () => {
     expect(view.targetCol).toBeGreaterThan(0);
   });
 
+  it("renders pending context badges inside the frame", () => {
+    const view = buildRenderView({
+      prompt: "> ",
+      lines: ["hello"],
+      row: 0,
+      col: 5,
+      mode: "edit",
+      cols: 80,
+      badges: ["skills: review, docs"],
+    });
+    expect(view.rows.join("\n")).toContain("skills: review, docs");
+  });
+
   it("builds a picker view with an inline query and no footer", () => {
     const view = buildRenderView({
       prompt: "Choose",
@@ -260,7 +319,7 @@ describe("lineEditor render views", () => {
       pickQuery: "alp",
     });
     expect(view.kind).toBe("pick");
-    expect(view.rows[0]).toContain("[alp]");
+    expect(view.rows[1]).toContain("Search: alp");
     expect(view.rows.join("\n")).not.toContain("workdir");
   });
 

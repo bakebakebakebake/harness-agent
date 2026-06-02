@@ -3,20 +3,25 @@ import {
   type SlashCommand,
   type CommandContext,
 } from "./registry.js";
-import { randomUUID } from "node:crypto";
+import { configCommand, modelCommand, profileCommand } from "./profileCommands.js";
 import {
+  debugCommand,
+  diffCommand,
+  searchCommand,
+  skillCommand,
+} from "./interactionCommands.js";
+import {
+  forgetCommand,
+  memoryCommand,
+  rememberCommand,
+} from "./memoryCommands.js";
+import {
+  getActiveProfile,
   loadStore,
   saveStore,
-  setActive,
   upsertProfile,
-  removeProfile,
-  listProfiles,
-  getActiveProfile,
-  rememberModel,
-  maskKey,
   type Profile,
 } from "../profiles.js";
-import { collectOnboarding } from "../onboarding.js";
 import {
   listSessions,
   loadSession,
@@ -27,37 +32,16 @@ import {
 import type { PermissionMode } from "../permissions/policy.js";
 import type { ThinkingDepth, Message } from "../model/types.js";
 import { parseThinkingDepth } from "../config.js";
-import {
-  loadSkills,
-  listSkills,
-  skillContextBlock,
-} from "../ext/skills.js";
+import { loadSkills } from "../ext/skills.js";
 import { loadCustomCommandDefs, buildCustomCommands } from "../ext/commands.js";
 import { loadMcpServerDefinitions } from "../ext/mcp.js";
+import { loadRepoAgentConfig, saveRepoAgentConfig } from "../ext/repoConfig.js";
 import { renderTranscript } from "../ui/transcript.js";
 import { compactHistory } from "../loop/compact.js";
-import { colorizeDiff } from "../ui/diff.js";
-import { gitDiff } from "../util/git.js";
 import { contextWindowFor } from "../model/contextWindow.js";
-import { modelHint, selectModel } from "../model/selection.js";
 import { humanTokens, formatContextPercent } from "../ui/status.js";
 import { bold, cyan, dim, green, yellow, red, symbols } from "../ui/theme.js";
 import { cloneTodos, formatTodoList } from "../todos.js";
-import {
-  forgetMemoryCard,
-  listMemoryCards,
-  listMemoryStats,
-  listSupersedingMemoryCards,
-  readMemoryCardFromDb,
-  rebuildMemoryIndex,
-  searchMemoryCards,
-  touchMemoryCard,
-  upsertMemoryCard,
-} from "../memory/store.js";
-import { retrieveMemoryContext } from "../memory/retrieve.js";
-import { readCoreDigest, writeCoreDigest } from "../memory/digest.js";
-import { readTranscriptTurns } from "../memory/transcript.js";
-import type { MemoryCard } from "../memory/types.js";
 
 /**
  * Built-in slash commands (docs/08).
@@ -84,6 +68,8 @@ const exitCommand: SlashCommand = {
   name: "exit",
   aliases: ["quit"],
   description: "Leave Harness-Agent",
+  priority: -200,
+  dangerous: true,
   async run() {
     return { exit: true };
   },
@@ -92,6 +78,8 @@ const exitCommand: SlashCommand = {
 const clearCommand: SlashCommand = {
   name: "clear",
   description: "Start a fresh conversation (clear history)",
+  priority: -40,
+  dangerous: true,
   async run(ctx) {
     ctx.state.history.length = 0;
     // Start a new persisted session so the cleared chat is saved separately.
@@ -100,32 +88,9 @@ const clearCommand: SlashCommand = {
       model: ctx.state.config.model,
     });
     ctx.state.todos = [];
+    ctx.state.pendingContext = [];
+    ctx.state.pendingContextLabels = [];
     ctx.out(dim("  Conversation cleared."));
-    return {};
-  },
-};
-
-/**
- * /diff — show the working-tree git diff (#2), colorized. `/diff --staged`
- * (or `--cached`) shows the index diff. Read-only: spawns git with no mutating
- * args. Friendly message when the directory isn't a git repo.
- */
-const diffCommand: SlashCommand = {
-  name: "diff",
-  description: "Show uncommitted git changes (--staged for the index)",
-  subcommands: ["--staged", "--cached"],
-  async run(ctx, args) {
-    const staged = args.some((a) => a === "--staged" || a === "--cached");
-    const raw = gitDiff(ctx.state.config.workdir, { staged });
-    if (raw === null) {
-      ctx.out(dim("  Not a git repository (or git is unavailable)."));
-      return {};
-    }
-    if (raw.trim() === "") {
-      ctx.out(dim(staged ? "  No staged changes." : "  No uncommitted changes."));
-      return {};
-    }
-    ctx.out(colorizeDiff(raw.trimEnd()));
     return {};
   },
 };
@@ -140,6 +105,8 @@ const diffCommand: SlashCommand = {
 const compactCommand: SlashCommand = {
   name: "compact",
   description: "Summarize older turns to free up context",
+  keywords: ["summarize", "context"],
+  priority: 30,
   async run(ctx) {
     const { state } = ctx;
     if (state.history.length === 0) {
@@ -188,63 +155,11 @@ function shortTime(iso: string): string {
   );
 }
 
-function memoryCardItems(cards: readonly MemoryCard[]): Array<{
-  label: string;
-  value: string;
-  hint?: string;
-}> {
-  return cards.map((card) => ({
-    label: card.title,
-    value: card.id,
-    hint: `${card.scope} ${symbols.dot} ${card.kind} ${symbols.dot} ${card.status}`,
-  }));
-}
-
-async function pickMemoryCard(
-  ctx: CommandContext,
-  prompt: string,
-  cards: readonly MemoryCard[],
-): Promise<string | null> {
-  if (cards.length === 0) {
-    ctx.out(dim("  No memories yet."));
-    return null;
-  }
-  if (!ctx.pick) return null;
-  return ctx.pick(prompt, memoryCardItems(cards));
-}
-
-async function askMemoryQuery(
-  ctx: CommandContext,
-  prompt: string,
-): Promise<string> {
-  const query = (await ctx.ask(prompt)).trim();
-  if (!query) {
-    ctx.out(dim("  Cancelled."));
-    return "";
-  }
-  return query;
-}
-
-function printMemoryOverview(ctx: CommandContext): void {
-  const stats = listMemoryStats(ctx.state.config.workdir);
-  const digest = readCoreDigest(ctx.state.config.workdir);
-  ctx.out(bold("  Memory"));
-  ctx.out(`  ${dim("total")}      ${stats.total}`);
-  ctx.out(`  ${dim("active")}     ${stats.active}`);
-  ctx.out(`  ${dim("superseded")} ${stats.superseded}`);
-  ctx.out(`  ${dim("expired")}    ${stats.expired}`);
-  ctx.out(`  ${dim("forgotten")}  ${stats.forgotten}`);
-  ctx.out(`  ${dim("digest")}     ${Math.max(0, digest.length - 1)} line(s)`);
-  ctx.out(
-    dim(
-      "  Use /memory list, /memory search <query>, /memory show <id>, /memory rebuild, /memory compact, /memory diagnose <query>.",
-    ),
-  );
-}
-
 const resumeCommand: SlashCommand = {
   name: "resume",
   description: "List saved conversations, or resume one by number/id",
+  keywords: ["session", "conversation", "history"],
+  priority: 100,
   async run(ctx, args) {
     const sessions = listSessions();
     if (sessions.length === 0) {
@@ -316,314 +231,10 @@ const resumeCommand: SlashCommand = {
 const todoCommand: SlashCommand = {
   name: "todo",
   description: "Show the current session todo list",
+  priority: 70,
   async run(ctx) {
     ctx.out(bold("  Session todo"));
     ctx.out("  " + formatTodoList(ctx.state.todos).split("\n").join("\n  "));
-    return {};
-  },
-};
-
-const memoryCommand: SlashCommand = {
-  name: "memory",
-  description: "Inspect and manage native memory cards",
-  subcommands: ["list", "search", "show", "rebuild", "compact", "diagnose"],
-  async run(ctx, args) {
-    let sub = (args[0] ?? "").trim().toLowerCase();
-    if (!sub) {
-      if (ctx.pick) {
-        const choice = await ctx.pick("  Memory action", [
-          { label: "Overview", value: "overview", hint: "stats and digest summary" },
-          { label: "List memories", value: "list", hint: "show current memory cards" },
-          { label: "Show memory", value: "show", hint: "pick a memory card to inspect" },
-          { label: "Search memories", value: "search", hint: "find by keyword" },
-          { label: "Diagnose retrieval", value: "diagnose", hint: "explain why memories rank" },
-          { label: "Refresh digest", value: "compact", hint: "rebuild the core digest" },
-          { label: "Rebuild index", value: "rebuild", hint: "rebuild sqlite index from cards" },
-        ]);
-        if (choice === null) {
-          ctx.out(dim("  Cancelled."));
-          return {};
-        }
-        sub = choice;
-      } else {
-        printMemoryOverview(ctx);
-        return {};
-      }
-    }
-
-    if (sub === "overview") {
-      printMemoryOverview(ctx);
-      return {};
-    }
-
-    if (sub === "list") {
-      const cards = listMemoryCards(ctx.state.config.workdir).slice(0, 20);
-      if (cards.length === 0) {
-        ctx.out(dim("  No memories yet."));
-        return {};
-      }
-      ctx.out(bold("  Memory cards"));
-      for (const card of cards) {
-        ctx.out(
-          `  ${cyan(card.id)} ${bold(card.title)} ${dim(`(${card.scope} · ${card.kind} · ${card.status})`)}`,
-        );
-        ctx.out(`    ${card.summary}`);
-      }
-      return {};
-    }
-
-    if (sub === "search") {
-      let query = args.slice(1).join(" ").trim();
-      if (!query && ctx.pick) {
-        query = await askMemoryQuery(ctx, "  Search memories: ");
-      }
-      if (!query) {
-        ctx.out(dim("  Usage: /memory search <query>"));
-        return {};
-      }
-      const hits = searchMemoryCards(ctx.state.config.workdir, query, { limit: 8 });
-      if (hits.length === 0) {
-        ctx.out(dim("  No matching memories."));
-        return {};
-      }
-      for (const hit of hits) touchMemoryCard(ctx.state.config.workdir, hit.card.id);
-      writeCoreDigest(ctx.state.config.workdir);
-      ctx.out(bold(`  Memory search: ${query}`));
-      for (const hit of hits) {
-        ctx.out(
-          `  ${cyan(hit.card.id)} ${bold(hit.card.title)} ${dim(`(${hit.card.scope} · ${hit.card.kind})`)}`,
-        );
-        ctx.out(`    ${hit.card.summary}`);
-      }
-      return {};
-    }
-
-    if (sub === "show") {
-      let id = (args[1] ?? "").trim();
-      if (!id && ctx.pick) {
-        id =
-          (await pickMemoryCard(
-            ctx,
-            "  Show which memory?",
-            listMemoryCards(ctx.state.config.workdir).slice(0, 50),
-          )) ?? "";
-      }
-      if (!id) {
-        ctx.out(dim("  Usage: /memory show <id>"));
-        return {};
-      }
-      const card = readMemoryCardFromDb(ctx.state.config.workdir, id);
-      if (!card) {
-        ctx.out(red(`  No memory "${id}".`));
-        return {};
-      }
-      touchMemoryCard(ctx.state.config.workdir, id);
-      writeCoreDigest(ctx.state.config.workdir);
-      ctx.out(bold(`  ${card.title}`));
-      ctx.out(dim(`  ${card.id} ${symbols.dot} ${card.scope} ${symbols.dot} ${card.kind} ${symbols.dot} ${card.status}`));
-      ctx.out(`  ${card.summary}`);
-      ctx.out(
-        dim(
-          `  accessed ${card.accessCount} time(s) · ` +
-            `${card.sourceTurnRefs.length} evidence ref(s)` +
-            (card.sourceSessionId ? ` · session ${card.sourceSessionId}` : ""),
-        ),
-      );
-      if (card.supersedes.length > 0) {
-        ctx.out(
-          dim(
-            `  supersedes ${card.supersedes
-              .map((ref) => readMemoryCardFromDb(ctx.state.config.workdir, ref)?.title ?? ref)
-              .join(", ")}`,
-          ),
-        );
-      }
-      const supersededBy = listSupersedingMemoryCards(ctx.state.config.workdir, card.id);
-      if (supersededBy.length > 0) {
-        ctx.out(
-          dim(
-            `  superseded by ${supersededBy
-              .map((next) => `${next.title} (${next.id})`)
-              .join(", ")}`,
-          ),
-        );
-      }
-      const evidence =
-        card.sourceSessionId && card.sourceTurnRefs.length > 0
-          ? readTranscriptTurns(card.sourceSessionId)
-              .filter((turn) => card.sourceTurnRefs.some((ref) => ref.endsWith(`:${turn.turnIndex}`)))
-              .slice(0, 3)
-          : [];
-      if (evidence.length > 0) {
-        ctx.out(dim("  evidence preview"));
-        for (const turn of evidence) {
-          const prefix = `${turn.role}[${turn.turnIndex}]`;
-          const text = turn.text.length > 120 ? `${turn.text.slice(0, 117)}…` : turn.text;
-          ctx.out(`    ${prefix} ${text}`);
-        }
-      }
-      if (card.body.trim()) ctx.out("\n" + card.body);
-      return {};
-    }
-
-    if (sub === "rebuild") {
-      const count = rebuildMemoryIndex(ctx.state.config.workdir);
-      writeCoreDigest(ctx.state.config.workdir);
-      ctx.out(green(`  Rebuilt memory index from ${count} card(s).`));
-      return {};
-    }
-
-    if (sub === "compact") {
-      const digest = writeCoreDigest(ctx.state.config.workdir);
-      ctx.out(green("  Core digest refreshed."));
-      for (const line of digest) ctx.out(`  ${line}`);
-      return {};
-    }
-
-    if (sub === "diagnose") {
-      let query = args.slice(1).join(" ").trim();
-      if (!query && ctx.pick) {
-        query = await askMemoryQuery(ctx, "  Diagnose memory for query: ");
-      }
-      if (!query) {
-        ctx.out(dim("  Usage: /memory diagnose <query>"));
-        return {};
-      }
-      const packet = retrieveMemoryContext({
-        cwd: ctx.state.config.workdir,
-        query,
-        budget: ctx.state.config.memoryInjectionBudget,
-      });
-      ctx.out(bold(`  Memory diagnose: ${query}`));
-      ctx.out(`  ${dim("intent")} ${packet.intent}`);
-      ctx.out(`  ${dim("budget")} ${packet.tokenEstimate}/${ctx.state.config.memoryInjectionBudget}`);
-      ctx.out(`  ${dim("preferred scope")} ${packet.diagnostics?.preferredScope ?? "n/a"}`);
-      if (packet.coreDigest.length > 0) {
-        ctx.out(`  ${dim("core digest")}`);
-        for (const line of packet.coreDigest) ctx.out(`    ${line}`);
-      }
-      if ((packet.diagnostics?.candidates.length ?? 0) > 0) {
-        ctx.out(`  ${dim("candidates")}`);
-        for (const cand of packet.diagnostics!.candidates) {
-          ctx.out(
-            `    ${cand.id} ${symbols.dot} ${cand.title} ${dim(`(${cand.scope} · ${cand.kind} · ${cand.status} · ${cand.source})`)}`,
-          );
-          ctx.out(
-            `      ${dim("score")} ${cand.score.toFixed(3)} ${dim("quality")} ${cand.quality.toFixed(3)} ${dim("freshness")} ${cand.freshness.toFixed(3)}`,
-          );
-          if (cand.reasons.length > 0) {
-            ctx.out(`      ${dim("reasons")} ${cand.reasons.join(", ")}`);
-          }
-        }
-      }
-      if ((packet.diagnostics?.relationships.length ?? 0) > 0) {
-        ctx.out(`  ${dim("conflicts")}`);
-        for (const rel of packet.diagnostics!.relationships) {
-          const label =
-            rel.relation === "supersedes"
-              ? "supersedes"
-              : "superseded by";
-          ctx.out(
-            `    ${rel.id} ${symbols.dot} ${rel.title} ${dim(label)} ${rel.targetId} ${dim(`(${rel.targetTitle} · ${rel.targetStatus})`)}`,
-          );
-        }
-      }
-      if (packet.skills.length > 0) {
-        ctx.out(`  ${dim("related skills")}`);
-        for (const skill of packet.skills) {
-          ctx.out(`    ${skill.name} ${dim(`(${skill.scope})`)} ${skill.description}`);
-        }
-      }
-      return {};
-    }
-
-    ctx.out(red(`  Unknown /memory subcommand "${args[0]}".`));
-    return {};
-  },
-};
-
-const rememberCommand: SlashCommand = {
-  name: "remember",
-  description: "Write a memory card from a short note",
-  async run(ctx, args) {
-    let scope: "project" | "user" = "project";
-    if ((args[0] ?? "") === "user" || (args[0] ?? "") === "project") {
-      scope = args[0] as "project" | "user";
-      args = args.slice(1);
-    } else if (args.length === 0 && ctx.pick) {
-      const choice = await ctx.pick("  Remember as", [
-        { label: "Project memory", value: "project", hint: "repo convention or workflow" },
-        { label: "User memory", value: "user", hint: "personal preference or style" },
-      ]);
-      if (choice === null) {
-        ctx.out(dim("  Cancelled."));
-        return {};
-      }
-      scope = choice as "project" | "user";
-    }
-    let text = args.join(" ").trim();
-    if (!text && ctx.pick) {
-      text = await askMemoryQuery(ctx, `  ${scope} memory text: `);
-    }
-    if (!text) {
-      ctx.out(dim("  Usage: /remember [project|user] <text>"));
-      return {};
-    }
-    const now = new Date().toISOString();
-    const title = text.length > 48 ? text.slice(0, 48) + "…" : text;
-    const card: MemoryCard = {
-      id: randomUUID(),
-      title,
-      scope,
-      kind: scope === "user" ? "preference" : "fact",
-      tier: "archive" as const,
-      summary: text,
-      body: text,
-      tags: [],
-      entities: [],
-      importance: 0.6,
-      trust: 0.9,
-      status: "active" as const,
-      supersedes: [],
-      sourceSessionId: ctx.state.session.id,
-      sourceTurnRefs: [],
-      sourceKind: "manual" as const,
-      createdAt: now,
-      updatedAt: now,
-      accessCount: 0,
-    };
-    upsertMemoryCard(ctx.state.config.workdir, card);
-    writeCoreDigest(ctx.state.config.workdir);
-    ctx.out(green(`  Remembered ${scope} memory ${card.id}.`));
-    return {};
-  },
-};
-
-const forgetCommand: SlashCommand = {
-  name: "forget",
-  description: "Soft-forget a memory card by id",
-  async run(ctx, args) {
-    let id = args.join(" ").trim();
-    if (!id && ctx.pick) {
-      id =
-        (await pickMemoryCard(
-          ctx,
-          "  Forget which memory?",
-          listMemoryCards(ctx.state.config.workdir)
-            .filter((card) => card.status !== "forgotten")
-            .slice(0, 50),
-        )) ?? "";
-    }
-    if (!id) {
-      ctx.out(dim("  Usage: /forget <id>"));
-      return {};
-    }
-    if (!forgetMemoryCard(ctx.state.config.workdir, id)) {
-      ctx.out(red(`  No memory "${id}".`));
-      return {};
-    }
-    writeCoreDigest(ctx.state.config.workdir);
-    ctx.out(green(`  Forgot memory ${id}.`));
     return {};
   },
 };
@@ -648,28 +259,6 @@ const renameCommand: SlashCommand = {
   },
 };
 
-const configCommand: SlashCommand = {
-  name: "config",
-  description: "Show the active profile's settings",
-  async run(ctx) {
-    const { config, profileName } = ctx.state;
-    const ctxWin = contextWindowFor(config.model, config.contextWindow);
-    const ctxLabel = config.contextWindow
-      ? `${humanTokens(ctxWin)} ${dim("(override)")}`
-      : `${humanTokens(ctxWin)} ${dim("(auto)")}`;
-    const lines = [
-      `  ${dim("profile")}  ${profileName ? cyan(profileName) : dim("(env/.env)")}`,
-      `  ${dim("provider")} ${config.provider}`,
-      `  ${dim("model")}    ${config.model}`,
-      `  ${dim("baseURL")}  ${config.baseURL ?? dim("(default)")}`,
-      `  ${dim("context")}  ${ctxLabel}`,
-      `  ${dim("apiKey")}   ${maskKey(config.apiKey)}`,
-    ];
-    ctx.out(lines.join("\n"));
-    return {};
-  },
-};
-
 /**
  * /usage — a fuller snapshot of the live session (#9): model, permission mode,
  * reasoning depth, and context-window consumption (whole current prompt vs.
@@ -679,6 +268,8 @@ const usageCommand: SlashCommand = {
   name: "usage",
   aliases: ["status", "ctx"],
   description: "Show model, mode, thinking depth, and context usage",
+  keywords: ["context", "tokens"],
+  priority: 80,
   async run(ctx) {
     const { config, mode, usage } = ctx.state;
     const total = contextWindowFor(config.model, config.contextWindow);
@@ -735,6 +326,8 @@ const MODE_HELP: Array<[PermissionMode, string]> = [
 const modeCommand: SlashCommand = {
   name: "mode",
   description: "Show or set the permission mode (default|plan|acceptEdits|allowAll)",
+  keywords: ["permission", "plan", "allow"],
+  priority: 130,
   subcommands: ["default", "plan", "acceptEdits", "allowAll"],
   async run(ctx, args) {
     let value = (args[0] ?? "").trim().toLowerCase();
@@ -775,6 +368,8 @@ const modeCommand: SlashCommand = {
 const rewindCommand: SlashCommand = {
   name: "rewind",
   description: "Jump back to an earlier turn (truncate later history)",
+  keywords: ["history", "undo", "back"],
+  priority: 60,
   async run(ctx, args) {
     // Index every user turn (text messages, not tool_result user messages).
     const turns: Array<{ index: number; title: string; text: string }> = [];
@@ -857,10 +452,27 @@ const THINKING_HELP: Array<[ThinkingDepth, string]> = [
   ["high", "maximum reasoning budget (slowest)"],
 ];
 
+function patchActiveProfile(
+  ctx: CommandContext,
+  patch: Partial<Profile>,
+): boolean {
+  const name = ctx.state.profileName;
+  if (!name) return false;
+  const store = loadStore();
+  const current = getActiveProfile(store);
+  if (!current) return false;
+  upsertProfile(store, name, { ...current, ...patch });
+  saveStore(store);
+  ctx.state.rebuild();
+  return true;
+}
+
 const thinkingCommand: SlashCommand = {
   name: "thinking",
   aliases: ["think"],
   description: "Show or set reasoning depth (off|low|medium|high)",
+  keywords: ["reasoning", "depth"],
+  priority: 65,
   subcommands: ["off", "low", "medium", "high"],
   async run(ctx, args) {
     const current = ctx.state.config.thinkingDepth ?? "off";
@@ -899,6 +511,8 @@ const thinkingCommand: SlashCommand = {
 const keysCommand: SlashCommand = {
   name: "keys",
   description: "Show keyboard shortcuts",
+  keywords: ["shortcuts", "keyboard"],
+  priority: 10,
   async run(ctx) {
     const row = (k: string, d: string): string => `  ${cyan(k.padEnd(10))} ${dim(d)}`;
     ctx.out(
@@ -918,394 +532,11 @@ const keysCommand: SlashCommand = {
     return {};
   },
 };
-/**
- * Mutate the active profile via a patch, persist, and rebuild the provider.
- * Reports an error (and does nothing) when there's no active profile — e.g. the
- * session is running off env/.env, which the store commands can't edit.
- */
-function patchActiveProfile(
-  ctx: CommandContext,
-  patch: Partial<Profile>,
-): boolean {
-  const name = ctx.state.profileName;
-  if (!name) {
-    ctx.out(
-      red("  No active profile to edit.") +
-        dim(
-          " This session is using env/.env. Run /profile new to create one.",
-        ),
-    );
-    return false;
-  }
-  const store = loadStore();
-  const current = getActiveProfile(store);
-  if (!current) {
-    ctx.out(red(`  Active profile "${name}" not found in the store.`));
-    return false;
-  }
-  upsertProfile(store, name, { ...current, ...patch });
-  saveStore(store);
-  ctx.state.rebuild();
-  return true;
-}
-
-function printProfiles(ctx: CommandContext): void {
-  const store = loadStore();
-  const names = listProfiles(store);
-  if (names.length === 0) {
-    ctx.out(dim("  No profiles yet. Run /profile new to add one."));
-    return;
-  }
-  const rows = names.map((n) => {
-    const p = store.profiles[n]!;
-    const active = n === store.activeProfile;
-    const marker = active ? green(symbols.tool) : " ";
-    const label = active ? bold(green(n)) : n;
-    return `  ${marker} ${label} ${dim(`${p.provider} ${symbols.dot} ${p.model}`)}`;
-  });
-  ctx.out(rows.join("\n"));
-}
-
-/**
- * /profile — a small sub-command dispatcher:
- *   /profile               → picker / list / create / edit / remove
- *   /profile use <name>    → switch active + rebuild
- *   /profile new           → onboarding Q&A → new named profile
- *   /profile edit [name]   → change fields interactively (blank = keep)
- *   /profile rm <name>     → delete (confirm if it's the active one)
- */
-const profileCommand: SlashCommand = {
-  name: "profile",
-  aliases: ["profiles"],
-  description: "Manage profiles: pick | use | new | edit | rm",
-  subcommands: ["use", "new", "edit", "rm", "list"],
-  async run(ctx, args) {
-    const sub = args[0];
-    switch (sub) {
-      case undefined:
-        return profileHome(ctx);
-      case "list":
-        printProfiles(ctx);
-        return {};
-      case "use":
-        return profileUse(ctx, args[1]);
-      case "new":
-        return profileNew(ctx);
-      case "edit":
-        return profileEdit(ctx, args[1]);
-      case "rm":
-      case "remove":
-        return profileRemove(ctx, args[1]);
-      default:
-        ctx.out(
-          red(`  Unknown subcommand "/profile ${sub}".`) +
-            dim(" Try: use | new | edit | rm"),
-        );
-        return {};
-    }
-  },
-};
-
-async function profileHome(ctx: CommandContext): Promise<{ exit?: boolean }> {
-  const store = loadStore();
-  const items = profilePickerItems(store);
-
-  if (!ctx.pick) {
-    printProfileHomeText(ctx, store);
-    return {};
-  }
-
-  const choice = await ctx.pick("  Choose a profile", items);
-  if (!choice) {
-    ctx.out(dim("  Cancelled."));
-    return {};
-  }
-  if (choice === "new") return profileNew(ctx);
-  if (choice === "edit") return profileEdit(ctx, undefined);
-  if (choice === "rm") return profileRemove(ctx, store.activeProfile ?? undefined);
-  if (choice.startsWith("use:")) return profileUse(ctx, choice.slice(4));
-  return {};
-}
-
-function profilePickerItems(store: ReturnType<typeof loadStore>): Array<{
-  label: string;
-  value: string;
-  hint?: string;
-  selectable?: boolean;
-  tone?: "green" | "dim";
-}> {
-  const items: Array<{
-    label: string;
-    value: string;
-    hint?: string;
-    selectable?: boolean;
-    tone?: "green" | "dim";
-  }> = [
-    {
-      label: "Profiles",
-      value: "__profiles__",
-      selectable: false,
-      tone: "dim",
-    },
-  ];
-  const names = listProfiles(store);
-  if (names.length === 0) {
-    items.push({
-      label: "(none yet)",
-      value: "__profiles_empty__",
-      selectable: false,
-      tone: "dim",
-    });
-  } else {
-    for (const name of names) {
-      const p = store.profiles[name]!;
-      const active = name === store.activeProfile;
-      items.push({
-        label: active ? `${name} (active)` : name,
-        value: `use:${name}`,
-        hint: `${p.provider} ${symbols.dot} ${p.model}`,
-        ...(active ? { tone: "green" as const } : {}),
-      });
-    }
-  }
-
-  items.push({
-    label: "Actions",
-    value: "__actions__",
-    selectable: false,
-    tone: "dim",
-  });
-  items.push({
-    label: "New profile",
-    value: "new",
-    hint: "Create a fresh profile",
-  });
-  if (store.activeProfile) {
-    items.push({
-      label: "Edit active profile",
-      value: "edit",
-      hint: store.activeProfile,
-    });
-    items.push({
-      label: "Remove active profile",
-      value: "rm",
-      hint: store.activeProfile,
-    });
-  }
-  return items;
-}
-
-function printProfileHomeText(
-  ctx: CommandContext,
-  store: ReturnType<typeof loadStore>,
-): void {
-  const names = listProfiles(store);
-  ctx.out(dim("  Profiles"));
-  if (names.length === 0) {
-    ctx.out(dim("    (none yet)"));
-  } else {
-    for (const name of names) {
-      const p = store.profiles[name]!;
-      const active = name === store.activeProfile;
-      const label = active ? green(`${name} (active)`) : name;
-      ctx.out(`    ${label} ${dim(`${p.provider} ${symbols.dot} ${p.model}`)}`);
-    }
-  }
-  ctx.out(dim("  Actions"));
-  ctx.out("    New profile");
-  if (store.activeProfile) {
-    ctx.out(`    Edit active profile ${dim(`(${store.activeProfile})`)}`);
-    ctx.out(`    Remove active profile ${dim(`(${store.activeProfile})`)}`);
-  }
-  ctx.out(dim("  Use /profile use <name>, /profile new, /profile edit, or /profile rm."));
-}
-
-async function profileUse(
-  ctx: CommandContext,
-  name: string | undefined,
-): Promise<{ exit?: boolean }> {
-  if (!name) {
-    ctx.out(dim("  Usage: /profile use <name>"));
-    return {};
-  }
-  const store = loadStore();
-  try {
-    setActive(store, name);
-  } catch (err) {
-    ctx.out(red(`  ${(err as Error).message}`));
-    return {};
-  }
-  saveStore(store);
-  ctx.state.rebuild();
-  ctx.out(green(`  Switched to profile "${name}".`));
-  return {};
-}
-
-async function profileNew(ctx: CommandContext): Promise<{ exit?: boolean }> {
-  const result = await collectOnboarding(ctx.ask);
-  if (
-    !result.entries.ANTHROPIC_API_KEY &&
-    !result.entries.OPENAI_API_KEY
-  ) {
-    ctx.out(yellow("  No API key entered — profile not created."));
-    return {};
-  }
-  const store = loadStore();
-  let name = (await ctx.ask("Name this profile [default]: ")).trim() || "default";
-  // Avoid silently clobbering an existing profile with the same name.
-  while (name in store.profiles) {
-    const ans = (
-      await ctx.ask(`Profile "${name}" exists. Overwrite? [y/N] or new name: `)
-    ).trim();
-    if (/^(y|yes)$/i.test(ans)) break;
-    if (ans && !/^(n|no)$/i.test(ans)) {
-      name = ans;
-      continue;
-    }
-    // declined without a new name → keep prompting for a name
-    name = (await ctx.ask("New profile name: ")).trim() || name;
-    if (!(name in store.profiles)) break;
-  }
-  let profile: Profile = {
-    provider: result.provider,
-    model: result.model,
-    apiKey: result.entries.ANTHROPIC_API_KEY ?? result.entries.OPENAI_API_KEY!,
-    ...(result.baseURL ? { baseURL: result.baseURL } : {}),
-  };
-  profile = rememberModel(profile, result.model);
-  upsertProfile(store, name, profile);
-  setActive(store, name);
-  saveStore(store);
-  ctx.state.rebuild();
-  ctx.out(green(`  Created and switched to profile "${name}".`));
-  return {};
-}
-
-async function profileEdit(
-  ctx: CommandContext,
-  nameArg: string | undefined,
-): Promise<{ exit?: boolean }> {
-  const store = loadStore();
-  const name = nameArg ?? store.activeProfile ?? "";
-  const current = store.profiles[name];
-  if (!current) {
-    ctx.out(red(`  No profile named "${name}".`));
-    return {};
-  }
-  ctx.out(dim(`  Editing "${name}". Press Enter to keep the current value.`));
-  if ((current.recentModels ?? []).length > 1) {
-    ctx.out(dim(`  recent models: ${current.recentModels!.slice(0, 6).join(", ")}`));
-  }
-  const baseURL = (
-    await ctx.ask(`Base URL [${current.baseURL ?? "(default)"}]: `)
-  ).trim();
-  const key = (await ctx.ask("API key [keep current]: ", { secret: true })).trim();
-  const source = {
-    provider: current.provider,
-    apiKey: key || current.apiKey,
-    ...(baseURL ? { baseURL } : current.baseURL ? { baseURL: current.baseURL } : {}),
-  } as const;
-  const selection = await selectModel({
-    ask: ctx.ask,
-    pick: ctx.pick,
-    currentModel: current.model,
-    recentModels: current.recentModels ?? [],
-    ...source,
-    discover: shouldDiscoverModels(source),
-    manualPrompt: `Model [${current.model}]: `,
-    choosePrompt: `  Model for "${name}"`,
-  });
-  const model = selection.model || current.model;
-
-  let next: Profile = {
-    ...current,
-    model,
-    ...(key ? { apiKey: key } : {}),
-  };
-  if (baseURL) next.baseURL = baseURL;
-  // Record the model in recent history when it changed (feature #8).
-  next = rememberModel(next, model);
-  upsertProfile(store, name, next);
-  saveStore(store);
-  if (name === store.activeProfile) ctx.state.rebuild();
-  ctx.out(green(`  Updated profile "${name}".`));
-  return {};
-}
-
-async function profileRemove(
-  ctx: CommandContext,
-  name: string | undefined,
-): Promise<{ exit?: boolean }> {
-  if (!name) {
-    ctx.out(dim("  Usage: /profile rm <name>"));
-    return {};
-  }
-  const store = loadStore();
-  if (!(name in store.profiles)) {
-    ctx.out(red(`  No profile named "${name}".`));
-    return {};
-  }
-  if (name === store.activeProfile) {
-    const ans = (
-      await ctx.ask(
-        `"${name}" is the active profile. Remove it anyway? [y/N] `,
-      )
-    ).trim();
-    if (!/^(y|yes)$/i.test(ans)) {
-      ctx.out(dim("  Cancelled."));
-      return {};
-    }
-  }
-  removeProfile(store, name);
-  saveStore(store);
-  ctx.state.rebuild();
-  ctx.out(green(`  Removed profile "${name}".`));
-  if (!store.activeProfile) {
-    ctx.out(yellow("  No profiles left — run /profile new to add one."));
-  }
-  return {};
-}
-
-const modelCommand: SlashCommand = {
-  name: "model",
-  description: "Show, pick, or set the active model",
-  async run(ctx, args) {
-    const value = args.join(" ").trim();
-    if (!value) {
-      const currentProfile = getActiveProfile(loadStore());
-      const selection = await selectModel({
-        ask: ctx.ask,
-        pick: ctx.pick,
-        provider: ctx.state.config.provider,
-        apiKey: ctx.state.config.apiKey,
-        ...(ctx.state.config.baseURL ? { baseURL: ctx.state.config.baseURL } : {}),
-        currentModel: ctx.state.config.model,
-        recentModels: currentProfile?.recentModels ?? [],
-        discover: shouldDiscoverModels({
-          apiKey: ctx.state.config.apiKey,
-        }),
-        manualPrompt: `Model [${ctx.state.config.model}]: `,
-        choosePrompt: "  Choose a model",
-      });
-      if (!selection.model || selection.model === ctx.state.config.model) {
-        ctx.out(
-          `  ${dim("model")} ${ctx.state.config.model} ${dim(`(${modelHint(ctx.state.config.model)})`)}`,
-        );
-        const recent = activeRecentModels(ctx);
-        if (recent.length > 1) {
-          ctx.out(dim(`  recent: ${recent.slice(0, 6).join(", ")}`));
-        }
-        return {};
-      }
-      return setModel(ctx, selection.model);
-    }
-    return setModel(ctx, value);
-  },
-};
-
 const mcpCommand: SlashCommand = {
   name: "mcp",
-  description: "Show configured MCP servers",
+  description: "Show MCP server status",
+  keywords: ["server", "tools"],
+  priority: 90,
   subcommands: ["list"],
   async run(ctx, args) {
     const sub = (args[0] ?? "list").trim().toLowerCase();
@@ -1314,106 +545,79 @@ const mcpCommand: SlashCommand = {
       return {};
     }
     const defs = loadMcpServerDefinitions(ctx.state.config.workdir);
-    if (defs.length === 0) {
+    const status = ctx.mcpStatus?.() ?? [];
+    if (defs.length === 0 && status.length === 0) {
       ctx.out(dim("  No MCP servers configured. Add JSON files under .agents/mcp or .agent/mcp."));
       return {};
     }
     ctx.out(bold("  MCP servers"));
     for (const def of defs) {
+      const live = status.find((item) => item.name === def.name);
       ctx.out(
         `  ${cyan(def.name.padEnd(16))} ${dim(
-          `${def.command}${def.args?.length ? ` ${def.args.join(" ")}` : ""} (${def.scope})`,
+          `${live?.connected ? "connected" : "idle"} ${symbols.dot} ` +
+          `${live?.loadedTools ?? 0} tool(s) ${symbols.dot} ${def.scope}`,
         )}`,
+      );
+      ctx.out(
+        `  ${dim(" ".repeat(18) + def.command + (def.args?.length ? ` ${def.args.join(" ")}` : ""))}`,
       );
       if (def.description) ctx.out(`  ${dim(" ".repeat(18) + def.description)}`);
     }
-    ctx.out(dim("  The agent can load matching tools on demand with mcp_search."));
+    ctx.out(dim("  Matching tools are still loaded on demand through mcp_search."));
     return {};
   },
 };
 
-/** Recent model ids of the active profile, newest first (may be empty). */
-function activeRecentModels(ctx: CommandContext): string[] {
-  const store = loadStore();
-  const current = getActiveProfile(store);
-  return current?.recentModels ?? [];
-}
-
-/**
- * Try remote model discovery whenever we have credentials.
- *
- * This keeps `/model` and `/profile edit` useful with official endpoints too,
- * not only with an explicit custom base URL. A failed lookup already falls back
- * to current/recent/manual selection, so the downside is limited to one best-
- * effort network call.
- */
-function shouldDiscoverModels(source: {
-  apiKey: string;
-}): boolean {
-  return source.apiKey.trim().length > 0;
-}
-
-async function setModel(
-  ctx: CommandContext,
-  model: string,
-): Promise<{ exit?: boolean }> {
-  const trimmed = model.trim();
-  if (!trimmed) {
-    ctx.out(red("  Model name cannot be empty."));
-    return {};
-  }
-
-  const store = loadStore();
-  const current = getActiveProfile(store);
-  if (current) {
-    const next = rememberModel({ ...current, model: trimmed }, trimmed);
-    if (patchActiveProfile(ctx, next)) {
-      ctx.out(green(`  Model set to "${trimmed}".`));
-    }
-    return {};
-  }
-
-  ctx.state.config = { ...ctx.state.config, model: trimmed };
-  ctx.out(green(`  Model set to "${trimmed}" (session only).`));
-  return {};
-}
-
-/**
- * /skill — inject a project/user Skill's body as context for the next turn
- * (B2, docs/09). No arg lists available skills (arrow picker when possible).
- * Skill content is untrusted data: it shapes the prompt but never bypasses the
- * permission gate.
- */
-const skillCommand: SlashCommand = {
-  name: "skill",
-  aliases: ["skills"],
-  description: "Load a Skill's context for the next turn (or list skills)",
+const protectCommand: SlashCommand = {
+  name: "protect",
+  description: "Manage blocked model commands and protected paths",
+  keywords: ["safety", "guard", "block"],
+  priority: 88,
+  subcommands: ["list", "add", "rm"],
   async run(ctx, args) {
-    const skills = loadSkills(ctx.state.config.workdir);
-    if (skills.size === 0) {
-      ctx.out(dim("  No skills found. Add files under .agents/skills/ or .agent/skills/."));
+    const cwd = ctx.state.config.workdir;
+    const config = loadRepoAgentConfig(cwd);
+    const sub = (args[0] ?? "list").trim().toLowerCase();
+
+    const printSummary = (): void => {
+      ctx.out(bold("  Repo protections"));
+      ctx.out(`  ${dim("blocked commands")} ${config.blockedCommands.length}`);
+      for (const pattern of config.blockedCommands) ctx.out(`    ${pattern}`);
+      ctx.out(`  ${dim("protected paths")} ${config.protectedPaths.length}`);
+      for (const path of config.protectedPaths) ctx.out(`    ${path}`);
+    };
+
+    if (sub === "list") {
+      printSummary();
       return {};
     }
-    let name = (args[0] ?? "").trim().toLowerCase();
-    if (!name) {
-      ctx.out(bold("  Skills"));
-      for (const s of listSkills(skills)) {
-        ctx.out(`  ${cyan(s.name.padEnd(16))} ${dim(`${s.description} (${s.scope})`)}`);
-      }
-      ctx.out(dim("  Load with /skill <name>. The model can also call skill_load when needed."));
+
+    const action = (args[1] ?? "").trim().toLowerCase();
+    const value = args.slice(2).join(" ").trim();
+    if (!["add", "rm"].includes(sub) || !["command", "path"].includes(action) || !value) {
+      ctx.out(dim("  Usage: /protect list"));
+      ctx.out(dim("         /protect add command <pattern>"));
+      ctx.out(dim("         /protect rm command <pattern>"));
+      ctx.out(dim("         /protect add path <path>"));
+      ctx.out(dim("         /protect rm path <path>"));
       return {};
     }
-    const skill = skills.get(name);
-    if (!skill) {
-      ctx.out(red(`  No skill "${name}". Type /skill to list.`));
+
+    if (action === "command") {
+      const next = new Set(config.blockedCommands);
+      if (sub === "add") next.add(value.toLowerCase());
+      else next.delete(value.toLowerCase());
+      saveRepoAgentConfig(cwd, { ...config, blockedCommands: [...next] });
+      ctx.out(green(`  ${sub === "add" ? "Added" : "Removed"} blocked command pattern "${value}".`));
       return {};
     }
-    ctx.state.pendingContext.push(skillContextBlock(skill));
-    ctx.out(
-      green(
-        `  Loaded skill "${skill.name}" — only your next message will include its content.`,
-      ),
-    );
+
+    const next = new Set(config.protectedPaths);
+    if (sub === "add") next.add(value);
+    else next.delete(value);
+    saveRepoAgentConfig(cwd, { ...config, protectedPaths: [...next] });
+    ctx.out(green(`  ${sub === "add" ? "Added" : "Removed"} protected path "${value}".`));
     return {};
   },
 };
@@ -1474,9 +678,12 @@ const BUILTINS: SlashCommand[] = [
   forgetCommand,
   configCommand,
   usageCommand,
+  debugCommand,
   profileCommand,
   modelCommand,
   mcpCommand,
+  protectCommand,
+  searchCommand,
   thinkingCommand,
   skillCommand,
   resumeCommand,

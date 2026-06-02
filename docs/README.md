@@ -52,6 +52,12 @@
 | [11 · 可观测性、评估与验证](11-observability-eval.md) | 可靠性 | 结构化日志/成本追踪、eval 数据集/回归、改完跑 build/test |
 | [12 · 原生记忆系统](12-memory-system.md) | 长期记忆 | transcript 证据、Markdown cards、SQLite 索引、core digest、预算感知注入 |
 
+### 当前版本补充说明
+
+| 文档 | 主题 | 一句话 |
+|---|---|---|
+| [13 · 当前交互与搜索工作流](13-interaction-and-search.md) | 当前 CLI 行为 | `/` 菜单排序、`/skill`、`/diff`、`/search`、`/debug` 的实际使用方式 |
+
 ## 五条最值得记住的总原则
 
 1. **循环很简单,harness 很难。** Agent 的心脏是个朴素的 while 循环;真正的工程量在权限、上下文、工具路由、错误恢复这些横切关注点上。

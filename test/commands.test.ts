@@ -103,6 +103,7 @@ function makeCtx(answers: string[] = []): {
     todos: [],
     skillCatalog: [],
     pendingContext: [],
+    pendingContextLabels: [],
     refreshSkills() {
       this.skillCatalog = [];
     },
@@ -208,6 +209,20 @@ describe("dispatch parsing", () => {
     expect(output()).toContain("Session todo");
     expect(output()).toContain("[x] Inspect files");
     expect(output()).toContain("[~] Add tests");
+  });
+
+  it("ranks an exact slash command match above fuzzy matches", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const items = reg.menuItems("/mode");
+    expect(items?.[0]?.value).toBe("/mode");
+  });
+
+  it("does not put /exit at the top of the empty slash menu", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const items = reg.menuItems("/");
+    expect(items?.[0]?.value).not.toBe("/exit");
   });
 
   it("shows whole-context usage separately from last-call usage", async () => {
@@ -681,10 +696,8 @@ describe("/skill", () => {
     state.config.workdir = root;
     await reg.dispatch("/skill", ctx);
     const out = output();
-    expect(out).toContain("review");
-    expect(out).toContain("code review helper");
-    expect(out).toContain("Load with /skill <name>.");
-    expect(out).toContain("skill_load");
+    expect(out).toBe("");
+    expect(state.pendingContextLabels).toEqual(["review"]);
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -701,8 +714,83 @@ describe("/skill", () => {
     state.config.workdir = root;
     await reg.dispatch("/skill review", ctx);
     expect(state.pendingContext).toEqual(["# Skill: review\n\nReview carefully."]);
-    expect(output()).toContain("only your next message will include its content");
+    expect(state.pendingContextLabels).toEqual(["review"]);
+    expect(output()).toBe("");
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("clears queued skills", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "skills-"));
+    mkdirSync(join(root, ".agents", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    const reg = buildRegistry();
+    const { ctx, state } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/skill review", ctx);
+    await reg.dispatch("/skill clear", ctx);
+    expect(state.pendingContext).toEqual([]);
+    expect(state.pendingContextLabels).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("can disable and re-enable a skill at repo scope", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "skills-"));
+    mkdirSync(join(root, ".agents", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/skill disable review", ctx);
+    await reg.dispatch("/skill review", ctx);
+    expect(output()).toContain('Skill "review" disabled.');
+    expect(output()).toContain('Skill "review" is disabled.');
+    await reg.dispatch("/skill enable review", ctx);
+    expect(output()).toContain('Skill "review" enabled.');
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("/search", () => {
+  it("searches and fetches the selected result", async () => {
+    isolated();
+    global.fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("bing.com/search?format=rss")) {
+        return new Response(
+          [
+            '<?xml version="1.0" encoding="utf-8" ?><rss><channel>',
+            "<item>",
+            "<title>Official docs</title>",
+            "<link>https://docs.example.com/api</link>",
+            "<description>Read the docs.</description>",
+            "<pubDate>Mon, 01 Jun 2026 05:39:00 GMT</pubDate>",
+            "</item>",
+            "</channel></rss>",
+          ].join(""),
+          { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } },
+        );
+      }
+      return new Response("<html><body><h1>Official docs</h1><p>Hello world</p></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }) as typeof fetch;
+
+    const reg = buildRegistry();
+    const { ctx, output } = makeCtx(["https://docs.example.com/api"]);
+    await reg.dispatch("/search api reference", ctx);
+    const out = output();
+    expect(out).toContain("Search: api reference");
+    expect(out).toContain("Official docs");
+    expect(out).toContain("Hello world");
   });
 });
 

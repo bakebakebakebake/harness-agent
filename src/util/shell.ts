@@ -24,6 +24,12 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Per-stream output cap; defaults to DEFAULT_MAX_OUTPUT. */
   maxOutput?: number;
+  /** Override which shell executable runs the command line. */
+  shellPath?: string;
+  /** Use a login shell so startup files and environment are loaded. */
+  loginShell?: boolean;
+  /** Use an interactive shell so aliases/functions are available. */
+  interactiveShell?: boolean;
 }
 
 export interface RunResult {
@@ -108,10 +114,27 @@ export function runProcess(
 
 /** Run a raw command line through the shell (interactive `!` mode path). */
 export function runShell(commandLine: string, opts: RunOptions): Promise<RunResult> {
-  const child = spawn(commandLine, {
-    cwd: opts.cwd,
-    shell: true,
-    ...(opts.signal ? { signal: opts.signal } : {}),
-  });
+  const shellPath = opts.shellPath || process.env.SHELL;
+  const useShellProgram = typeof shellPath === "string" && shellPath.trim() !== "";
+  const child = useShellProgram
+    ? spawn(
+        shellPath!,
+        [
+          ...(opts.interactiveShell ? ["-i"] : []),
+          ...(opts.loginShell ? ["-l"] : []),
+          "-c",
+          commandLine,
+        ],
+        {
+          cwd: opts.cwd,
+          shell: false,
+          ...(opts.signal ? { signal: opts.signal } : {}),
+        },
+      )
+    : spawn(commandLine, {
+        cwd: opts.cwd,
+        shell: true,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      });
   return capture(child, commandLine, opts);
 }

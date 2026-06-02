@@ -11,7 +11,7 @@ import type { SessionState } from "./commands/registry.js";
 import { PermissionPolicy } from "./permissions/policy.js";
 import { createGate, type Confirmer, type ConfirmRequest } from "./permissions/confirm.js";
 import { Renderer } from "./ui/render.js";
-import { box, bold, cyan, dim, symbols, visibleWidth } from "./ui/theme.js";
+import { box, bold, cyan, dim, red, symbols, visibleWidth, yellow } from "./ui/theme.js";
 import { statusLine, workdirLine } from "./ui/status.js";
 import { contextWindowFor } from "./model/contextWindow.js";
 import { beside, mascot, mascotTagline } from "./ui/mascot.js";
@@ -24,6 +24,8 @@ import { loadStore, storePath } from "./profiles.js";
 import { newSession, saveSession, deriveTitle } from "./sessions.js";
 import { loadCustomCommandDefs, buildCustomCommands } from "./ext/commands.js";
 import { loadSkills, formatSkillCatalog } from "./ext/skills.js";
+import { type Skill, skillContextBlock } from "./ext/skills.js";
+import { loadRepoAgentConfig } from "./ext/repoConfig.js";
 import { searchFiles } from "./ext/fileSearch.js";
 import { runShell } from "./util/shell.js";
 import { gitBranchCached } from "./util/git.js";
@@ -39,6 +41,16 @@ import { formatMemoryContext, retrieveMemoryContext } from "./memory/retrieve.js
 import { appendTranscriptMessages, readTranscriptTurns } from "./memory/transcript.js";
 import { extractAndApplyMemory } from "./memory/extract.js";
 import { writeCoreDigest } from "./memory/digest.js";
+import { logger } from "./util/logger.js";
+import { classifyRuntimeError } from "./util/errors.js";
+
+function attachSkillToState(state: SessionState, skill: Skill): void {
+  const block = skillContextBlock(skill);
+  if (!state.pendingContext.includes(block)) state.pendingContext.push(block);
+  if (!state.pendingContextLabels.includes(skill.name)) {
+    state.pendingContextLabels.push(skill.name);
+  }
+}
 
 /**
  * CLI entry — the REPL that wires every module together (docs/01, docs/08).
@@ -71,6 +83,39 @@ async function main(): Promise<void> {
         ...(h.dir ? { hint: h.dir } : {}),
       }));
     },
+    skillMenu: (query) => {
+      const skills = [...loadSkills(process.cwd()).values()];
+      if (skills.length === 0) return null;
+      const needle = query.trim().toLowerCase();
+      const filtered = skills
+        .map((skill) => {
+          const name = skill.name.toLowerCase();
+          const desc = skill.description.toLowerCase();
+          let score = 0;
+          if (!needle) score = 1;
+          else if (name === needle) score = 5000;
+          else if (name.startsWith(needle)) score = 4200;
+          else if (name.includes(needle)) score = 3000;
+          else if (desc.includes(needle)) score = 800;
+          return { skill, score };
+        })
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
+        .slice(0, 12)
+        .map(({ skill }) => ({
+          label: skill.name,
+          value: skill.name,
+          hint:
+            `${skill.scopeLabel} ${symbols.dot} ~${skill.approxTokens} tok` +
+            (skill.description ? ` ${symbols.dot} ${skill.description}` : ""),
+        }));
+      return filtered.length > 0 ? filtered : null;
+    },
+    attachSkill: (skillName) => {
+      const skill = loadSkills(process.cwd()).get(skillName.toLowerCase());
+      if (!skill) return;
+      attachSkillToState(state, skill);
+    },
     // Tint the input frame cyan in plan mode (#8). `state` is initialized below
     // and this runs lazily on each draw, so it always sees the live mode.
     planMode: () => state.mode === "plan",
@@ -79,6 +124,18 @@ async function main(): Promise<void> {
       workdir: state.config.workdir,
       branch: gitBranchCached(state.config.workdir),
     }),
+    badges: () => {
+      const badges: string[] = [];
+      if (state.pendingContextLabels.length > 0) {
+        badges.push(`skills: ${state.pendingContextLabels.join(", ")}`);
+      }
+      const connectedMcp = mcp
+        .status()
+        .filter((item) => item.connected)
+        .map((item) => item.name);
+      if (connectedMcp.length > 0) badges.push(`mcp: ${connectedMcp.join(", ")}`);
+      return badges;
+    },
   });
   const ask = (prompt: string, opts?: { secret?: boolean }): Promise<string> =>
     opts?.secret ? reader.askSecret(prompt) : reader.ask(prompt);
@@ -146,6 +203,7 @@ async function main(): Promise<void> {
     },
     todos: [],
     pendingContext: [],
+    pendingContextLabels: [],
     refreshSkills() {
       skillCatalog = formatSkillCatalog(loadSkills(this.config.workdir));
       this.skillCatalog = skillCatalog;
@@ -209,11 +267,13 @@ async function main(): Promise<void> {
     confirmer,
     workdir: config.workdir,
     notify: (req) => renderer.notify(req.summary),
+    repoConfig: () => loadRepoAgentConfig(state.config.workdir),
   });
   const subagentGate = createGate({
     policy,
     confirmer,
     workdir: config.workdir,
+    repoConfig: () => loadRepoAgentConfig(state.config.workdir),
   });
 
   const runSubagent = async (request: SubagentRequest): Promise<SubagentResult> => {
@@ -320,6 +380,7 @@ async function main(): Promise<void> {
     pick: (prompt: string, items: { label: string; value: string; hint?: string }[]) =>
       reader.pick(prompt, items),
     clear: () => stdout.write("\x1b[2J\x1b[H"),
+    mcpStatus: () => mcp.status(),
   };
 
   // REPL loop: read a line; "/" → command; else run a turn.
@@ -363,17 +424,26 @@ async function main(): Promise<void> {
     }
 
     if (input.startsWith("/")) {
-      const result = await commands.dispatch(input, baseCtx);
-      if (result.exit) break;
-      // A custom command may queue a prompt to run as this turn's input (B2).
-      if (state.queuedInput) {
-        input = state.queuedInput;
-        state.queuedInput = undefined;
-      } else if (state.seedInput) {
-        stdout.write("\n");
-        continue;
-      } else {
-        stdout.write("\n");
+      try {
+        const result = await commands.dispatch(input, baseCtx);
+        if (result.exit) break;
+        // A custom command may queue a prompt to run as this turn's input (B2).
+        if (state.queuedInput) {
+          input = state.queuedInput;
+          state.queuedInput = undefined;
+        } else if (state.seedInput) {
+          stdout.write("\n");
+          continue;
+        } else {
+          stdout.write("\n");
+          continue;
+        }
+      } catch (err) {
+        logger.error("slash command failed", {
+          input,
+          error: (err as Error).stack ?? (err as Error).message,
+        });
+        stdout.write(red(`  Command failed: ${(err as Error).message}\n\n`));
         continue;
       }
     }
@@ -398,6 +468,7 @@ async function main(): Promise<void> {
       : "";
     const extraContext = state.pendingContext;
     state.pendingContext = [];
+    state.pendingContextLabels = [];
     const system = appendPromptBlocks(
       systemPrompt(state.config.workdir, state.skillCatalog),
       [memoryBlock, ...extraContext],
@@ -431,6 +502,17 @@ async function main(): Promise<void> {
       })) {
         renderer.on(ev);
       }
+    } catch (err) {
+      logger.error("agent loop failed", {
+        input,
+        error: (err as Error).stack ?? (err as Error).message,
+      });
+      stdout.write(
+        yellow(
+          `  Turn failed: ${classifyRuntimeError(err as Error)} ` +
+            "Your session is still intact; you can retry.\n",
+        ),
+      );
     } finally {
       stopListening();
     }
@@ -524,7 +606,13 @@ async function maybeAutoCompact(
  */
 async function runShellCommand(cmd: string, workdir: string): Promise<void> {
   stdout.write(dim(`  ${symbols.dot} $ ${cmd}\n`));
-  const r = await runShell(cmd, { cwd: workdir, timeoutMs: 120_000 });
+  const r = await runShell(cmd, {
+    cwd: workdir,
+    timeoutMs: 120_000,
+    shellPath: process.env.SHELL,
+    loginShell: true,
+    interactiveShell: true,
+  });
   if (r.error) {
     stdout.write(`  ${cmd}: ${r.error}\n`);
     return;
@@ -577,7 +665,22 @@ function indent(text: string): string {
     .join("\n");
 }
 
+process.on("unhandledRejection", (reason) => {
+  logger.error("unhandled rejection", {
+    error: reason instanceof Error ? reason.stack ?? reason.message : String(reason),
+  });
+});
+
+process.on("uncaughtException", (err) => {
+  logger.error("uncaught exception", {
+    error: err.stack ?? err.message,
+  });
+});
+
 main().catch((err) => {
-  process.stderr.write("Fatal: " + (err as Error).stack + "\n");
+  logger.error("fatal startup error", {
+    error: (err as Error).stack ?? (err as Error).message,
+  });
+  process.stderr.write("Fatal: " + classifyRuntimeError(err as Error) + "\n");
   process.exit(1);
 });

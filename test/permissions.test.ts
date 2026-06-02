@@ -195,4 +195,27 @@ describe("createGate — modes (#5)", () => {
     expect(d.allow).toBe(true);
     expect(notified).toBe(false);
   });
+
+  it("blocks model actions that match repo protect rules", async () => {
+    const gate = createGate({
+      policy: new PermissionPolicy({ mode: "allowAll" }),
+      confirmer: yesConfirmer,
+      workdir,
+      repoConfig: () => ({
+        disabledSkills: [],
+        blockedCommands: ["rm -rf"],
+        protectedPaths: ["src/secret"],
+      }),
+    });
+    const deniedShell = await gate({
+      tool: toolOf("shell", "high"),
+      input: { command_line: "rm -rf src/secret" },
+    });
+    expect(deniedShell.allow).toBe(false);
+    const deniedWrite = await gate({
+      tool: toolOf("write", "medium"),
+      input: { path: "src/secret/config.json", content: "{}" },
+    });
+    expect(deniedWrite.allow).toBe(false);
+  });
 });

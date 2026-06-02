@@ -66,10 +66,16 @@ export interface LineReaderOptions {
   menu?: (buffer: string) => MenuItem[] | null;
   /** Candidates for the `@` file-mention menu (#4); null closes it. */
   fileMenu?: (query: string) => MenuItem[] | null;
+  /** Candidates for the `#` skill picker; null closes it. */
+  skillMenu?: (query: string) => MenuItem[] | null;
+  /** Called when a `#` skill is attached inline to the current draft. */
+  attachSkill?: (skillName: string) => void;
   /** Session-plan-mode probe; tints the input frame cyan (#8/#9). */
   planMode?: () => boolean;
   /** Persistent footer row (workdir + branch) beneath the frame (#10). */
   footer?: () => string;
+  /** Visible labels for next-turn context like selected skills. */
+  badges?: () => string[];
 }
 
 export class LineReader {
@@ -125,13 +131,30 @@ export class LineReader {
             : null;
         }
       : undefined;
+    const skillMenu = this.opts.skillMenu
+      ? (query: string): EditorMenuItem[] | null => {
+          const items = this.opts.skillMenu!(query);
+          return items
+            ? items.map((m) => ({
+                label: m.label,
+                value: m.value,
+                hint: m.hint,
+                selectable: m.selectable,
+                tone: m.tone,
+              }))
+            : null;
+        }
+      : undefined;
     const result = await runEditor({
       keys: this.keys,
       prompt: present.prompt,
       history: this.history,
+      ...(this.opts.badges ? { badges: this.opts.badges() } : {}),
       ...(seed ? { seed } : {}),
       ...(menu ? { menu } : {}),
       ...(fileMenu ? { fileMenu } : {}),
+      ...(skillMenu ? { skillMenu } : {}),
+      ...(this.opts.attachSkill ? { attachSkill: this.opts.attachSkill } : {}),
       ...(this.opts.planMode ? { planMode: this.opts.planMode } : {}),
       ...(this.opts.footer ? { footer: this.opts.footer } : {}),
     });

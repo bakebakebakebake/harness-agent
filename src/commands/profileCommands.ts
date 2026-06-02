@@ -1,0 +1,413 @@
+import type { CommandContext, PickItem, SlashCommand } from "./registry.js";
+import { contextWindowFor } from "../model/contextWindow.js";
+import { modelHint, selectModel } from "../model/selection.js";
+import { collectOnboarding } from "../onboarding.js";
+import {
+  getActiveProfile,
+  listProfiles,
+  loadStore,
+  maskKey,
+  rememberModel,
+  removeProfile,
+  saveStore,
+  setActive,
+  upsertProfile,
+  type Profile,
+} from "../profiles.js";
+import { humanTokens } from "../ui/status.js";
+import { bold, cyan, dim, green, red, symbols, yellow } from "../ui/theme.js";
+
+export const configCommand: SlashCommand = {
+  name: "config",
+  description: "Show the active profile's settings",
+  keywords: ["settings", "profile"],
+  priority: 40,
+  async run(ctx) {
+    const { config, profileName } = ctx.state;
+    const ctxWin = contextWindowFor(config.model, config.contextWindow);
+    const ctxLabel = config.contextWindow
+      ? `${humanTokens(ctxWin)} ${dim("(override)")}`
+      : `${humanTokens(ctxWin)} ${dim("(auto)")}`;
+    const lines = [
+      `  ${dim("profile")}  ${profileName ? cyan(profileName) : dim("(env/.env)")}`,
+      `  ${dim("provider")} ${config.provider}`,
+      `  ${dim("model")}    ${config.model}`,
+      `  ${dim("baseURL")}  ${config.baseURL ?? dim("(default)")}`,
+      `  ${dim("context")}  ${ctxLabel}`,
+      `  ${dim("apiKey")}   ${maskKey(config.apiKey)}`,
+    ];
+    ctx.out(lines.join("\n"));
+    return {};
+  },
+};
+
+function patchActiveProfile(ctx: CommandContext, patch: Partial<Profile>): boolean {
+  const name = ctx.state.profileName;
+  if (!name) {
+    ctx.out(
+      red("  No active profile to edit.") +
+        dim(" This session is using env/.env. Run /profile new to create one."),
+    );
+    return false;
+  }
+  const store = loadStore();
+  const current = getActiveProfile(store);
+  if (!current) {
+    ctx.out(red(`  Active profile "${name}" not found in the store.`));
+    return false;
+  }
+  upsertProfile(store, name, { ...current, ...patch });
+  saveStore(store);
+  ctx.state.rebuild();
+  return true;
+}
+
+function printProfiles(ctx: CommandContext): void {
+  const store = loadStore();
+  const names = listProfiles(store);
+  if (names.length === 0) {
+    ctx.out(dim("  No profiles yet. Run /profile new to add one."));
+    return;
+  }
+  const rows = names.map((name) => {
+    const profile = store.profiles[name]!;
+    const active = name === store.activeProfile;
+    const marker = active ? green(symbols.tool) : " ";
+    const label = active ? bold(green(name)) : name;
+    return `  ${marker} ${label} ${dim(`${profile.provider} ${symbols.dot} ${profile.model}`)}`;
+  });
+  ctx.out(rows.join("\n"));
+}
+
+function profilePickerItems(store: ReturnType<typeof loadStore>): PickItem[] {
+  const items: PickItem[] = [
+    {
+      label: "Profiles",
+      value: "__profiles__",
+      selectable: false,
+      tone: "dim",
+    },
+  ];
+  const names = listProfiles(store);
+  if (names.length === 0) {
+    items.push({
+      label: "(none yet)",
+      value: "__profiles_empty__",
+      selectable: false,
+      tone: "dim",
+    });
+  } else {
+    for (const name of names) {
+      const profile = store.profiles[name]!;
+      const active = name === store.activeProfile;
+      items.push({
+        label: active ? `${name} (active)` : name,
+        value: `use:${name}`,
+        hint: `${profile.provider} ${symbols.dot} ${profile.model}`,
+        ...(active ? { tone: "green" as const } : {}),
+      });
+    }
+  }
+
+  items.push({
+    label: "Actions",
+    value: "__actions__",
+    selectable: false,
+    tone: "dim",
+  });
+  items.push({
+    label: "New profile",
+    value: "new",
+    hint: "Create a fresh profile",
+  });
+  if (store.activeProfile) {
+    items.push({
+      label: "Edit active profile",
+      value: "edit",
+      hint: store.activeProfile,
+    });
+    items.push({
+      label: "Remove active profile",
+      value: "rm",
+      hint: store.activeProfile,
+    });
+  }
+  return items;
+}
+
+function printProfileHomeText(ctx: CommandContext, store: ReturnType<typeof loadStore>): void {
+  const names = listProfiles(store);
+  ctx.out(dim("  Profiles"));
+  if (names.length === 0) {
+    ctx.out(dim("    (none yet)"));
+  } else {
+    for (const name of names) {
+      const profile = store.profiles[name]!;
+      const active = name === store.activeProfile;
+      const label = active ? green(`${name} (active)`) : name;
+      ctx.out(`    ${label} ${dim(`${profile.provider} ${symbols.dot} ${profile.model}`)}`);
+    }
+  }
+  ctx.out(dim("  Actions"));
+  ctx.out("    New profile");
+  if (store.activeProfile) {
+    ctx.out(`    Edit active profile ${dim(`(${store.activeProfile})`)}`);
+    ctx.out(`    Remove active profile ${dim(`(${store.activeProfile})`)}`);
+  }
+  ctx.out(dim("  Use /profile use <name>, /profile new, /profile edit, or /profile rm."));
+}
+
+async function profileHome(ctx: CommandContext): Promise<{ exit?: boolean }> {
+  const store = loadStore();
+  const items = profilePickerItems(store);
+
+  if (!ctx.pick) {
+    printProfileHomeText(ctx, store);
+    return {};
+  }
+
+  const choice = await ctx.pick("  Choose a profile", items);
+  if (!choice) {
+    ctx.out(dim("  Cancelled."));
+    return {};
+  }
+  if (choice === "new") return profileNew(ctx);
+  if (choice === "edit") return profileEdit(ctx, undefined);
+  if (choice === "rm") return profileRemove(ctx, store.activeProfile ?? undefined);
+  if (choice.startsWith("use:")) return profileUse(ctx, choice.slice(4));
+  return {};
+}
+
+async function profileUse(
+  ctx: CommandContext,
+  name: string | undefined,
+): Promise<{ exit?: boolean }> {
+  if (!name) {
+    ctx.out(dim("  Usage: /profile use <name>"));
+    return {};
+  }
+  const store = loadStore();
+  try {
+    setActive(store, name);
+  } catch (err) {
+    ctx.out(red(`  ${(err as Error).message}`));
+    return {};
+  }
+  saveStore(store);
+  ctx.state.rebuild();
+  ctx.out(green(`  Switched to profile "${name}".`));
+  return {};
+}
+
+async function profileNew(ctx: CommandContext): Promise<{ exit?: boolean }> {
+  const result = await collectOnboarding(ctx.ask);
+  if (!result.entries.ANTHROPIC_API_KEY && !result.entries.OPENAI_API_KEY) {
+    ctx.out(yellow("  No API key entered — profile not created."));
+    return {};
+  }
+  const store = loadStore();
+  let name = (await ctx.ask("Name this profile [default]: ")).trim() || "default";
+  while (name in store.profiles) {
+    const answer = (await ctx.ask(`Profile "${name}" exists. Overwrite? [y/N] or new name: `)).trim();
+    if (/^(y|yes)$/i.test(answer)) break;
+    if (answer && !/^(n|no)$/i.test(answer)) {
+      name = answer;
+      continue;
+    }
+    name = (await ctx.ask("New profile name: ")).trim() || name;
+    if (!(name in store.profiles)) break;
+  }
+  let profile: Profile = {
+    provider: result.provider,
+    model: result.model,
+    apiKey: result.entries.ANTHROPIC_API_KEY ?? result.entries.OPENAI_API_KEY!,
+    ...(result.baseURL ? { baseURL: result.baseURL } : {}),
+  };
+  profile = rememberModel(profile, result.model);
+  upsertProfile(store, name, profile);
+  setActive(store, name);
+  saveStore(store);
+  ctx.state.rebuild();
+  ctx.out(green(`  Created and switched to profile "${name}".`));
+  return {};
+}
+
+function shouldDiscoverModels(source: { apiKey: string }): boolean {
+  return source.apiKey.trim().length > 0;
+}
+
+async function profileEdit(
+  ctx: CommandContext,
+  nameArg: string | undefined,
+): Promise<{ exit?: boolean }> {
+  const store = loadStore();
+  const name = nameArg ?? store.activeProfile ?? "";
+  const current = store.profiles[name];
+  if (!current) {
+    ctx.out(red(`  No profile named "${name}".`));
+    return {};
+  }
+  ctx.out(dim(`  Editing "${name}". Press Enter to keep the current value.`));
+  if ((current.recentModels ?? []).length > 1) {
+    ctx.out(dim(`  recent models: ${current.recentModels!.slice(0, 6).join(", ")}`));
+  }
+  const baseURL = (await ctx.ask(`Base URL [${current.baseURL ?? "(default)"}]: `)).trim();
+  const key = (await ctx.ask("API key [keep current]: ", { secret: true })).trim();
+  const source = {
+    provider: current.provider,
+    apiKey: key || current.apiKey,
+    ...(baseURL ? { baseURL } : current.baseURL ? { baseURL: current.baseURL } : {}),
+  } as const;
+  const selection = await selectModel({
+    ask: ctx.ask,
+    pick: ctx.pick,
+    currentModel: current.model,
+    recentModels: current.recentModels ?? [],
+    ...source,
+    discover: shouldDiscoverModels(source),
+    manualPrompt: `Model [${current.model}]: `,
+    choosePrompt: `  Model for "${name}"`,
+  });
+  const model = selection.model || current.model;
+
+  let next: Profile = {
+    ...current,
+    model,
+    ...(key ? { apiKey: key } : {}),
+  };
+  if (baseURL) next.baseURL = baseURL;
+  next = rememberModel(next, model);
+  upsertProfile(store, name, next);
+  saveStore(store);
+  if (name === store.activeProfile) ctx.state.rebuild();
+  ctx.out(green(`  Updated profile "${name}".`));
+  return {};
+}
+
+async function profileRemove(
+  ctx: CommandContext,
+  name: string | undefined,
+): Promise<{ exit?: boolean }> {
+  if (!name) {
+    ctx.out(dim("  Usage: /profile rm <name>"));
+    return {};
+  }
+  const store = loadStore();
+  if (!(name in store.profiles)) {
+    ctx.out(red(`  No profile named "${name}".`));
+    return {};
+  }
+  if (name === store.activeProfile) {
+    const answer = (await ctx.ask(`"${name}" is the active profile. Remove it anyway? [y/N] `)).trim();
+    if (!/^(y|yes)$/i.test(answer)) {
+      ctx.out(dim("  Cancelled."));
+      return {};
+    }
+  }
+  removeProfile(store, name);
+  saveStore(store);
+  ctx.state.rebuild();
+  ctx.out(green(`  Removed profile "${name}".`));
+  if (!store.activeProfile) {
+    ctx.out(yellow("  No profiles left — run /profile new to add one."));
+  }
+  return {};
+}
+
+export const profileCommand: SlashCommand = {
+  name: "profile",
+  aliases: ["profiles"],
+  description: "Manage profiles: pick | use | new | edit | rm",
+  keywords: ["provider", "account"],
+  priority: 140,
+  subcommands: ["use", "new", "edit", "rm", "list"],
+  async run(ctx, args) {
+    const sub = args[0];
+    switch (sub) {
+      case undefined:
+        return profileHome(ctx);
+      case "list":
+        printProfiles(ctx);
+        return {};
+      case "use":
+        return profileUse(ctx, args[1]);
+      case "new":
+        return profileNew(ctx);
+      case "edit":
+        return profileEdit(ctx, args[1]);
+      case "rm":
+      case "remove":
+        return profileRemove(ctx, args[1]);
+      default:
+        ctx.out(red(`  Unknown subcommand "/profile ${sub}".`) + dim(" Try: use | new | edit | rm"));
+        return {};
+    }
+  },
+};
+
+function activeRecentModels(ctx: CommandContext): string[] {
+  const store = loadStore();
+  const current = getActiveProfile(store);
+  return current?.recentModels ?? [];
+}
+
+async function setModel(ctx: CommandContext, model: string): Promise<{ exit?: boolean }> {
+  const trimmed = model.trim();
+  if (!trimmed) {
+    ctx.out(red("  Model name cannot be empty."));
+    return {};
+  }
+
+  const store = loadStore();
+  const current = getActiveProfile(store);
+  if (current) {
+    const next = rememberModel({ ...current, model: trimmed }, trimmed);
+    if (patchActiveProfile(ctx, next)) {
+      ctx.out(green(`  Model set to "${trimmed}".`));
+    }
+    return {};
+  }
+
+  ctx.state.config = { ...ctx.state.config, model: trimmed };
+  ctx.out(green(`  Model set to "${trimmed}" (session only).`));
+  return {};
+}
+
+export const modelCommand: SlashCommand = {
+  name: "model",
+  description: "Show, pick, or set the active model",
+  keywords: ["llm", "engine"],
+  priority: 135,
+  async run(ctx, args) {
+    const value = args.join(" ").trim();
+    if (!value) {
+      const currentProfile = getActiveProfile(loadStore());
+      const selection = await selectModel({
+        ask: ctx.ask,
+        pick: ctx.pick,
+        provider: ctx.state.config.provider,
+        apiKey: ctx.state.config.apiKey,
+        ...(ctx.state.config.baseURL ? { baseURL: ctx.state.config.baseURL } : {}),
+        currentModel: ctx.state.config.model,
+        recentModels: currentProfile?.recentModels ?? [],
+        discover: shouldDiscoverModels({
+          apiKey: ctx.state.config.apiKey,
+        }),
+        manualPrompt: `Model [${ctx.state.config.model}]: `,
+        choosePrompt: "  Choose a model",
+      });
+      if (!selection.model || selection.model === ctx.state.config.model) {
+        ctx.out(
+          `  ${dim("model")} ${ctx.state.config.model} ${dim(`(${modelHint(ctx.state.config.model)})`)}`,
+        );
+        const recent = activeRecentModels(ctx);
+        if (recent.length > 1) {
+          ctx.out(dim(`  recent: ${recent.slice(0, 6).join(", ")}`));
+        }
+        return {};
+      }
+      return setModel(ctx, selection.model);
+    }
+    return setModel(ctx, value);
+  },
+};

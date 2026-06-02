@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { extRoots, type ExtScope } from "./paths.js";
+import { loadRepoAgentConfig } from "./repoConfig.js";
 
 /**
  * Skills loader (B2, docs/09).
@@ -25,6 +26,10 @@ export interface Skill {
   description: string;
   body: string;
   scope: ExtScope;
+  scopeLabel: "global" | "project" | "system";
+  enabled: boolean;
+  approxTokens: number;
+  sourcePath: string;
 }
 
 interface FrontMatter {
@@ -52,6 +57,7 @@ function readSkill(
   file: string,
   fallbackName: string,
   scope: ExtScope,
+  disabled: Set<string>,
 ): Skill | null {
   let text: string;
   try {
@@ -66,6 +72,10 @@ function readSkill(
     description: data.description ?? "",
     body,
     scope,
+    scopeLabel: scope === "project" ? "project" : "global",
+    enabled: !disabled.has((data.name ?? fallbackName).toLowerCase()),
+    approxTokens: Math.max(1, Math.round(body.length / 4)),
+    sourcePath: file,
   };
 }
 
@@ -74,7 +84,11 @@ function readSkill(
  * override user-scope ones with the same name (workdir wins). Returns a map
  * keyed by lowercase skill name.
  */
-export function loadSkills(cwd: string): Map<string, Skill> {
+export function loadSkills(
+  cwd: string,
+  opts: { includeDisabled?: boolean } = {},
+): Map<string, Skill> {
+  const disabled = new Set(loadRepoAgentConfig(cwd).disabledSkills);
   const skills = new Map<string, Skill>();
   for (const root of extRoots(cwd)) {
     const dir = join(root.dir, "skills");
@@ -91,15 +105,15 @@ export function loadSkills(cwd: string): Map<string, Skill> {
       try {
         if (statSync(full).isDirectory()) {
           const md = join(full, "SKILL.md");
-          if (existsSync(md)) skill = readSkill(md, entry, root.scope);
+          if (existsSync(md)) skill = readSkill(md, entry, root.scope, disabled);
         } else if (entry.endsWith(".md")) {
-          skill = readSkill(full, entry.replace(/\.md$/, ""), root.scope);
+          skill = readSkill(full, entry.replace(/\.md$/, ""), root.scope, disabled);
         }
       } catch {
         skill = null;
       }
       // Later roots (project) overwrite earlier (user) on name clash.
-      if (skill) skills.set(skill.name, skill);
+      if (skill && (opts.includeDisabled || skill.enabled)) skills.set(skill.name, skill);
     }
   }
   return skills;
@@ -126,8 +140,10 @@ export function searchSkills(
       const haystack = `${skill.name} ${skill.description}`.toLowerCase();
       let score = 0;
       for (const term of terms) {
-        if (skill.name.includes(term)) score += 3;
-        else if (haystack.includes(term)) score += 1;
+        if (skill.name === term) score += 120;
+        else if (skill.name.startsWith(term)) score += 80;
+        else if (skill.name.includes(term)) score += 40;
+        else if (haystack.includes(term)) score += 8;
       }
       return { skill, score };
     })
@@ -144,7 +160,8 @@ export function formatSkillCatalog(skills: Map<string, Skill>): string[] {
     "Available skills:",
     ...items.map(
       (skill) =>
-        `- ${skill.name}: ${skill.description || "(no description)"} (${skill.scope})`,
+        `- ${skill.name}: ${skill.description || "(no description)"} ` +
+        `(${skill.scopeLabel}, ~${skill.approxTokens} tokens)`,
     ),
     "- When a listed skill fits the task, call skill_load with its name and use the returned body.",
   ];

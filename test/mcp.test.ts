@@ -67,6 +67,9 @@ describe("mcp_search tool", () => {
         calls.push({ candidate, input });
         return { content: `echo:${(input as { text?: string }).text ?? ""}`, isError: false };
       },
+      status() {
+        return [];
+      },
     };
     const r = await mcpSearchTool.execute(
       { query: "echo" },

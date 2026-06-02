@@ -23,6 +23,16 @@ function git(cwd: string, args: string[]): string | null {
   }
 }
 
+function diffBaseArgs(opts: { staged?: boolean } = {}): string[] {
+  const args = ["--no-pager", "diff", "--no-color"];
+  if (opts.staged) args.push("--staged");
+  return args;
+}
+
+function withPath(args: string[], path?: string): string[] {
+  return path ? [...args, "--", path] : args;
+}
+
 /** True if `cwd` is inside a git work tree. */
 export function isGitRepo(cwd: string): boolean {
   const out = git(cwd, ["rev-parse", "--is-inside-work-tree"]);
@@ -72,9 +82,84 @@ export function clearBranchCache(): void {
  * Working-tree diff. With `staged`, shows the index diff (`--staged`).
  * Returns the raw unified diff (possibly empty), or null if not a repo.
  */
-export function gitDiff(cwd: string, opts: { staged?: boolean } = {}): string | null {
+export function gitDiff(
+  cwd: string,
+  opts: { staged?: boolean; path?: string } = {},
+): string | null {
   if (!isGitRepo(cwd)) return null;
-  const args = ["--no-pager", "diff", "--no-color"];
-  if (opts.staged) args.push("--staged");
-  return git(cwd, args);
+  return git(cwd, withPath(diffBaseArgs(opts), opts.path));
+}
+
+export interface GitDiffFile {
+  path: string;
+  previousPath?: string;
+  status: "modified" | "added" | "deleted" | "renamed" | "copied" | "unknown";
+  additions: number;
+  deletions: number;
+}
+
+function mapStatus(code: string): GitDiffFile["status"] {
+  switch (code[0] ?? "") {
+    case "A":
+      return "added";
+    case "D":
+      return "deleted";
+    case "R":
+      return "renamed";
+    case "C":
+      return "copied";
+    case "M":
+      return "modified";
+    default:
+      return "unknown";
+  }
+}
+
+export function gitDiffFiles(
+  cwd: string,
+  opts: { staged?: boolean; path?: string } = {},
+): GitDiffFile[] | null {
+  if (!isGitRepo(cwd)) return null;
+  const numstat = git(cwd, withPath([...diffBaseArgs(opts), "--numstat"], opts.path)) ?? "";
+  const nameStatus = git(cwd, withPath([...diffBaseArgs(opts), "--name-status"], opts.path)) ?? "";
+  const stats = new Map<string, { additions: number; deletions: number }>();
+
+  for (const line of numstat.split("\n")) {
+    if (!line.trim()) continue;
+    const parts = line.split("\t");
+    if (parts.length < 3) continue;
+    const additions = parts[0] === "-" ? 0 : Number(parts[0] ?? 0);
+    const deletions = parts[1] === "-" ? 0 : Number(parts[1] ?? 0);
+    const path = parts.slice(2).join("\t");
+    stats.set(path, {
+      additions: Number.isFinite(additions) ? additions : 0,
+      deletions: Number.isFinite(deletions) ? deletions : 0,
+    });
+  }
+
+  const files: GitDiffFile[] = [];
+  for (const line of nameStatus.split("\n")) {
+    if (!line.trim()) continue;
+    const parts = line.split("\t");
+    const code = parts[0] ?? "M";
+    const status = mapStatus(code);
+    const previousPath =
+      status === "renamed" || status === "copied" ? parts[1] : undefined;
+    const path =
+      status === "renamed" || status === "copied"
+        ? parts[2] ?? parts[1] ?? ""
+        : parts[1] ?? "";
+    const stat = stats.get(path) ?? stats.get(parts.slice(1).join("\t")) ?? {
+      additions: 0,
+      deletions: 0,
+    };
+    files.push({
+      path,
+      ...(previousPath ? { previousPath } : {}),
+      status,
+      additions: stat.additions,
+      deletions: stat.deletions,
+    });
+  }
+  return files;
 }

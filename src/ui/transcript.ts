@@ -2,7 +2,7 @@ import type { Message } from "../model/types.js";
 import { renderMarkdown } from "./markdown.js";
 import { firstLine } from "./format.js";
 import { toolCallLine } from "./toolLine.js";
-import { dim, cyan, red, symbols } from "./theme.js";
+import { bold, dim, cyan, red, symbols } from "./theme.js";
 
 /**
  * Transcript re-renderer (A3 + B5).
@@ -38,7 +38,7 @@ function renderUserMessage(m: Message, write: (line: string) => void): void {
     .join("")
     .trim();
   if (!text) return; // a pure tool_result message — nothing to echo
-  write(`${cyan(symbols.arrow)} ${text}`);
+  write(`${bold(cyan("You"))} ${dim(symbols.dot)} ${text}`);
   write("");
 }
 

@@ -1,8 +1,16 @@
 import { stdout } from "node:process";
 import type { Key, KeySource } from "./keys.js";
-import { filterMenuRows, renderMenu, type MenuRow } from "./menu.js";
-import { visibleWidth, dim, gray, yellow, cyan } from "./theme.js";
-import { frameInput, frameInnerWidth, inputBorderTone } from "./frame.js";
+import { dim } from "./theme.js";
+import {
+  buildHintView,
+  buildRenderView,
+  changedRowIndices,
+  filterPickItems,
+  shouldFullRedraw,
+  wrapTextRows,
+  type RenderView,
+} from "./editorRender.js";
+import { logger } from "../util/logger.js";
 
 /**
  * Raw-mode line editor (B1 + B3 + B4).
@@ -34,6 +42,8 @@ export interface EditorMenuItem {
 export interface EditorOptions {
   keys: KeySource;
   prompt: string;
+  /** Visible next-turn context labels, e.g. selected skill names. */
+  badges?: string[];
   /** Initial buffer text. */
   initial?: string;
   /**
@@ -57,6 +67,13 @@ export interface EditorOptions {
    * Accepting one replaces just the `@token`, not the whole line.
    */
   fileMenu?: (query: string) => EditorMenuItem[] | null;
+  /**
+   * Candidate provider for the `#` inline-skill picker. Accepting a match
+   * attaches the skill to the current draft and removes the `#token`.
+   */
+  skillMenu?: (query: string) => EditorMenuItem[] | null;
+  /** Called when a skill is attached inline through the `#` picker. */
+  attachSkill?: (skillName: string) => void;
   /**
    * Fixed picker list. When set, the editor runs in "pick" mode: arrows select,
    * Enter resolves the chosen value, Esc/Ctrl-C resolves null. No free typing.
@@ -94,165 +111,7 @@ export function runEditor(opts: EditorOptions): Promise<EditorResult> {
 }
 
 type Mode = "edit" | "menu" | "pick" | "secret";
-type RenderKind = "frame" | "pick" | "hint";
-
-export interface RenderView {
-  kind: RenderKind;
-  rows: string[];
-  cursorRowInRegion: number;
-  targetCol: number;
-  collapseRows: string[];
-  structureKey: string;
-}
-
-export interface RenderViewOptions {
-  prompt: string;
-  lines: string[];
-  row: number;
-  col: number;
-  mode: Mode;
-  cols: number;
-  menuItems?: EditorMenuItem[];
-  menuSel?: number;
-  footer?: string;
-  planMode?: boolean;
-  pickQuery?: string;
-}
-
-export function changedRowIndices(prev: string[], next: string[]): number[] {
-  const out: number[] = [];
-  const total = Math.max(prev.length, next.length);
-  for (let i = 0; i < total; i++) {
-    if (prev[i] !== next[i]) out.push(i);
-  }
-  return out;
-}
-
-export function shouldFullRedraw(prev: RenderView | null, next: RenderView): boolean {
-  if (!prev) return true;
-  if (prev.kind !== next.kind) return true;
-  if (prev.rows.length !== next.rows.length) return true;
-  return prev.structureKey !== next.structureKey;
-}
-
-function plainCollapseRows(prompt: string, lines: string[], mode: Mode): string[] {
-  if (mode === "secret") {
-    return [prompt + "•".repeat((lines[0] ?? "").length)];
-  }
-  if (mode === "pick") {
-    return [prompt];
-  }
-  return lines.map((line, i) => (i === 0 ? prompt : "  ") + line);
-}
-
-function menuRowsOf(items: EditorMenuItem[]): MenuRow[] {
-  return items.map((item) => ({
-    label: item.label,
-    hint: item.hint,
-    selectable: item.selectable,
-    tone: item.tone,
-  }));
-}
-
-export function buildRenderView(opts: RenderViewOptions): RenderView {
-  const collapseRows = plainCollapseRows(opts.prompt, opts.lines, opts.mode);
-  if (opts.mode === "pick") {
-    const prompt = opts.pickQuery ? opts.prompt + dim(` [${opts.pickQuery}]`) : opts.prompt;
-    const menu = renderMenu(menuRowsOf(opts.menuItems ?? []), opts.menuSel ?? 0, undefined, opts.cols);
-    return {
-      kind: "pick",
-      rows: [prompt, ...menu.rows],
-      cursorRowInRegion: 0,
-      targetCol: visibleWidth(prompt),
-      collapseRows,
-      structureKey: `pick|items:${menu.rows.length}`,
-    };
-  }
-
-  const promptWidth = visibleWidth(opts.prompt);
-  const restPrefix = "  ";
-  const restPrefixWidth = visibleWidth(restPrefix);
-  const inner = frameInnerWidth([opts.prompt], opts.cols);
-  const firstWidth = Math.max(1, inner - promptWidth);
-  const restWidth = Math.max(1, inner - restPrefixWidth);
-
-  if (opts.mode === "secret") {
-    const full = opts.lines[0] ?? "";
-    const masked = "•".repeat(full.length);
-    const left = "•".repeat(opts.col);
-    const rows = wrapTextRows(masked, firstWidth, restWidth);
-    const leftRows = wrapTextRows(left, firstWidth, restWidth);
-    const framed = frameInput(
-      rows.map((row, i) => (i === 0 ? opts.prompt : restPrefix) + row),
-      gray,
-      inner,
-    );
-    return {
-      kind: "frame",
-      rows: framed,
-      cursorRowInRegion: 1 + leftRows.length - 1,
-      targetCol:
-        2 +
-        (leftRows.length === 1 ? promptWidth : restPrefixWidth) +
-        visibleWidth(leftRows[leftRows.length - 1] ?? ""),
-      collapseRows,
-      structureKey: `frame|secret|content:${rows.length}|footer:${opts.footer ? 1 : 0}`,
-    };
-  }
-
-  const contentRows: string[] = [];
-  let rowOffset = 0;
-  let cursorRow = 0;
-  let cursorCol = promptWidth;
-  for (let i = 0; i < opts.lines.length; i++) {
-    const text = opts.lines[i] ?? "";
-    const prefix = i === 0 ? opts.prompt : restPrefix;
-    const prefixWidth = i === 0 ? promptWidth : restPrefixWidth;
-    const wrapped = wrapTextRows(text, i === 0 ? firstWidth : restWidth, restWidth);
-    for (let j = 0; j < wrapped.length; j++) {
-      contentRows.push((j === 0 ? prefix : restPrefix) + wrapped[j]);
-    }
-    if (i === opts.row) {
-      const left = text.slice(0, opts.col);
-      const leftRows = wrapTextRows(left, i === 0 ? firstWidth : restWidth, restWidth);
-      cursorRow = rowOffset + leftRows.length - 1;
-      cursorCol =
-        (leftRows.length === 1 ? prefixWidth : restPrefixWidth) +
-        visibleWidth(leftRows[leftRows.length - 1] ?? "");
-    }
-    rowOffset += wrapped.length;
-  }
-
-  const tone = inputBorderTone(opts.lines[0] ?? "", opts.planMode ?? false);
-  const color = tone === "shell" ? yellow : tone === "plan" ? cyan : gray;
-  const rows = frameInput(contentRows, color, inner);
-  const menu = opts.mode === "menu"
-    ? renderMenu(menuRowsOf(opts.menuItems ?? []), opts.menuSel ?? 0, undefined, opts.cols)
-    : { rows: [] as string[] };
-  const footerRows = opts.footer ? [opts.footer] : [];
-
-  return {
-    kind: "frame",
-    rows: [...rows, ...menu.rows, ...footerRows],
-    cursorRowInRegion: 1 + cursorRow,
-    targetCol: 2 + cursorCol,
-    collapseRows,
-    structureKey:
-      `frame|tone:${tone}|content:${contentRows.length}|menu:${menu.rows.length}|footer:${footerRows.length}`,
-  };
-}
-
-export function buildHintView(prompt: string, lines: string[], hint: string): RenderView {
-  const promptLine = prompt + (lines[0] ?? "");
-  return {
-    kind: "hint",
-    rows: [promptLine, "  " + hint],
-    cursorRowInRegion: 0,
-    targetCol: visibleWidth(promptLine),
-    collapseRows: plainCollapseRows(prompt, lines, "edit"),
-    structureKey: "hint|rows:2",
-  };
-}
+export { buildHintView, buildRenderView, changedRowIndices, shouldFullRedraw, wrapTextRows };
 
 class Editor {
   private lines: string[] = [""];
@@ -276,8 +135,9 @@ class Editor {
    * `/…` line and accepting replaces it. "token" → an `@…` mention somewhere in
    * the line; accepting replaces just that token (menuTokenStart..col).
    */
-  private menuKind: "command" | "token" = "command";
+  private menuKind: "command" | "file" | "skill" = "command";
   private menuTokenStart = 0;
+  private menuTokenQuery = "";
   private histIdx = -1; // -1 = current (not recalled)
   /** Timestamp of the last Ctrl-C on an empty buffer, for double-press exit (#7). */
   private lastCtrlC = 0;
@@ -288,6 +148,16 @@ class Editor {
   private readonly history: string[];
   private readonly opts: EditorOptions;
   private readonly resolve: (r: EditorResult) => void;
+  private readonly onTerminalRefresh = (): void => {
+    logger.debug("editor terminal refresh");
+    if (!this.opts.keys.isTTY) return;
+    this.moveToRegionStart();
+    stdout.write("\x1b[J");
+    this.lastRenderedRows = [];
+    this.lastView = null;
+    this.lastCursorRow = 0;
+    this.draw();
+  };
 
   constructor(opts: EditorOptions, resolve: (r: EditorResult) => void) {
     this.opts = opts;
@@ -311,12 +181,16 @@ class Editor {
   }
 
   attach(): void {
+    process.on("SIGWINCH", this.onTerminalRefresh);
+    process.on("SIGCONT", this.onTerminalRefresh);
     this.draw();
     this.opts.keys.onKey((str, key) => this.onKey(str, key));
   }
 
   private finish(result: EditorResult): void {
     this.opts.keys.onKey(null);
+    process.off("SIGWINCH", this.onTerminalRefresh);
+    process.off("SIGCONT", this.onTerminalRefresh);
     // Collapse the drawn region to just the prompt + submitted line (drop the
     // menu/picker rows below), leaving the cursor at the end so the line stays
     // in scrollback. We move from wherever the cursor currently is to the
@@ -370,6 +244,7 @@ class Editor {
     // set on the KeySource; newlines in it must be inserted as text, not submit.
     if (this.opts.keys.pasting && str && !key.ctrl && !key.meta) {
       this.insertText(str);
+      this.refreshMenu();
       this.lastEsc = 0;
       return this.draw();
     }
@@ -400,10 +275,12 @@ class Editor {
       case "home":
         this.lastEsc = 0;
         this.col = 0;
+        this.refreshMenu();
         return this.draw();
       case "end":
         this.lastEsc = 0;
         this.col = (this.lines[this.row] ?? "").length;
+        this.refreshMenu();
         return this.draw();
       case "escape":
         return this.onEscape();
@@ -548,6 +425,7 @@ class Editor {
       this.row -= 1;
       this.col = (this.lines[this.row] ?? "").length;
     }
+    this.refreshMenu();
     this.draw();
   }
 
@@ -558,6 +436,7 @@ class Editor {
       this.row += 1;
       this.col = 0;
     }
+    this.refreshMenu();
     this.draw();
   }
 
@@ -571,6 +450,7 @@ class Editor {
     if (this.row > 0) {
       this.row -= 1;
       this.col = Math.min(this.col, (this.lines[this.row] ?? "").length);
+      this.refreshMenu();
       return this.draw();
     }
     this.recallHistory(1);
@@ -584,6 +464,7 @@ class Editor {
     if (this.row < this.lines.length - 1) {
       this.row += 1;
       this.col = Math.min(this.col, (this.lines[this.row] ?? "").length);
+      this.refreshMenu();
       return this.draw();
     }
     this.recallHistory(-1);
@@ -599,6 +480,7 @@ class Editor {
     this.lines = text.split("\n");
     this.row = this.lines.length - 1;
     this.col = (this.lines[this.row] ?? "").length;
+    this.refreshMenu();
     this.draw();
   }
 
@@ -652,14 +534,36 @@ class Editor {
 
     // 1) `@` file mention: look at the token ending at the cursor on this line.
     if (this.opts.fileMenu) {
-      const tok = this.atTokenAtCursor();
+      const tok = this.tokenAtCursor("@");
       if (tok) {
         const items = this.opts.fileMenu(tok.query);
         if (items && items.length > 0) {
-          const wasClosed = this.mode !== "menu" || this.menuKind !== "token";
+          const wasClosed = this.mode !== "menu" || this.menuKind !== "file";
+          logger.debug("editor menu open", { kind: "file", query: tok.query, count: items.length });
           this.mode = "menu";
-          this.menuKind = "token";
+          this.menuKind = "file";
           this.menuTokenStart = tok.start;
+          this.menuTokenQuery = tok.query;
+          this.menuItems = items;
+          this.menuSel = wasClosed
+            ? this.firstSelectableIndex(items)
+            : this.clampSelectableIndex(this.menuSel);
+          return;
+        }
+      }
+    }
+
+    if (this.opts.skillMenu) {
+      const tok = this.tokenAtCursor("#");
+      if (tok) {
+        const items = this.opts.skillMenu(tok.query);
+        if (items && items.length > 0) {
+          const wasClosed = this.mode !== "menu" || this.menuKind !== "skill";
+          logger.debug("editor menu open", { kind: "skill", query: tok.query, count: items.length });
+          this.mode = "menu";
+          this.menuKind = "skill";
+          this.menuTokenStart = tok.start;
+          this.menuTokenQuery = tok.query;
           this.menuItems = items;
           this.menuSel = wasClosed
             ? this.firstSelectableIndex(items)
@@ -674,8 +578,10 @@ class Editor {
       const items = this.opts.menu(this.bufferText());
       if (items && items.length > 0) {
         const wasClosed = this.mode !== "menu" || this.menuKind !== "command";
+        logger.debug("editor menu open", { kind: "command", buffer: this.bufferText(), count: items.length });
         this.mode = "menu";
         this.menuKind = "command";
+        this.menuTokenQuery = this.bufferText().replace(/^\//, "");
         this.menuItems = items;
         this.menuSel = wasClosed
           ? this.firstSelectableIndex(items)
@@ -693,10 +599,10 @@ class Editor {
    * `@` that is at line start or preceded by whitespace, and runs up to the
    * cursor with no whitespace. Returns null when there's no such token.
    */
-  private atTokenAtCursor(): { start: number; query: string } | null {
+  private tokenAtCursor(trigger: "@" | "#"): { start: number; query: string } | null {
     const line = this.lines[this.row] ?? "";
     const left = line.slice(0, this.col);
-    const at = left.lastIndexOf("@");
+    const at = left.lastIndexOf(trigger);
     if (at === -1) return null;
     // Must be at line start or preceded by whitespace.
     if (at > 0 && !/\s/.test(left[at - 1] ?? "")) return null;
@@ -707,9 +613,11 @@ class Editor {
   }
 
   private closeMenu(): void {
+    if (this.mode === "menu") logger.debug("editor menu close", { kind: this.menuKind });
     if (this.mode === "menu") this.mode = "edit";
     this.menuItems = [];
     this.menuSel = 0;
+    this.menuTokenQuery = "";
   }
 
   /** Accept the highlighted menu item. For a `/` command this replaces the
@@ -718,13 +626,24 @@ class Editor {
   private acceptMenu(): void {
     const item = this.menuItems[this.menuSel];
     if (!item || item.selectable === false) return;
-    if (this.menuKind === "token") {
+    if (this.menuKind === "file") {
       const line = this.lines[this.row] ?? "";
       const before = line.slice(0, this.menuTokenStart);
       const after = line.slice(this.col);
       const insert = item.value + " ";
       this.lines[this.row] = before + insert + after;
       this.col = before.length + insert.length;
+      this.closeMenu();
+      this.refreshMenu();
+      return this.draw();
+    }
+    if (this.menuKind === "skill") {
+      const line = this.lines[this.row] ?? "";
+      const before = line.slice(0, this.menuTokenStart);
+      const after = line.slice(this.col);
+      this.lines[this.row] = before + after;
+      this.col = before.length;
+      this.opts.attachSkill?.(item.value);
       this.closeMenu();
       this.refreshMenu();
       return this.draw();
@@ -799,11 +718,13 @@ class Editor {
       col: this.col,
       mode: this.mode,
       cols: stdout.columns ?? 80,
+      badges: this.mode === "pick" || this.mode === "secret" ? [] : this.opts.badges ?? [],
       menuItems: this.menuItems,
       menuSel: this.menuSel,
       footer: this.mode === "pick" || this.mode === "secret" ? "" : this.opts.footer?.() ?? "",
       planMode: this.opts.planMode?.() ?? false,
       pickQuery: this.pickQuery,
+      menuQuery: this.mode === "menu" ? this.menuTokenQuery : "",
     });
   }
 
@@ -871,37 +792,7 @@ class Editor {
       this.menuSel = this.firstSelectableIndex(this.menuItems);
       return;
     }
-    this.menuItems = filterMenuRows(this.pickItemsBase, needle) as EditorMenuItem[];
+    this.menuItems = filterPickItems(this.pickItemsBase, needle);
     this.menuSel = this.firstSelectableIndex(this.menuItems);
   }
-}
-
-export function wrapTextRows(
-  text: string,
-  firstWidth: number,
-  restWidth: number,
-): string[] {
-  const first = Math.max(1, firstWidth);
-  const rest = Math.max(1, restWidth);
-  if (text === "") return [""];
-
-  const rows: string[] = [];
-  let current = "";
-  let currentWidth = 0;
-  let limit = first;
-
-  for (const ch of text) {
-    const width = visibleWidth(ch);
-    if (currentWidth > 0 && currentWidth + width > limit) {
-      rows.push(current);
-      current = "";
-      currentWidth = 0;
-      limit = rest;
-    }
-    current += ch;
-    currentWidth += width;
-  }
-
-  if (current !== "" || rows.length === 0) rows.push(current);
-  return rows;
 }
