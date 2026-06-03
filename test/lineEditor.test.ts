@@ -393,6 +393,41 @@ describe("lineEditor inline skill badges", () => {
     expect(removed).toEqual(["skill:review", "mcp:github"]);
     expect(await p).toEqual({ kind: "submit", value: "older question" });
   });
+
+  it("does not let images trap attachment focus away from skills and MCP items", async () => {
+    const keys = new FakeKeys();
+    const removed: string[] = [];
+    const attachments = {
+      images: ["diagram.png"],
+      skills: ["review"],
+      mcps: ["github"],
+    };
+    const p = run(keys, {
+      attachments: () => attachments,
+      detachAttachment: (kind: "skill" | "mcp" | "image", label: string) => {
+        const list =
+          kind === "skill"
+            ? attachments.skills
+            : kind === "mcp"
+              ? attachments.mcps
+              : attachments.images;
+        const idx = list.indexOf(label);
+        if (idx === -1) return false;
+        list.splice(idx, 1);
+        removed.push(`${kind}:${label}`);
+        return true;
+      },
+      history: ["older question"],
+    });
+    keys.send("up");
+    keys.send("backspace");
+    keys.send("backspace");
+    keys.send("backspace");
+    keys.send("up");
+    keys.send("return");
+    expect(removed).toEqual(["skill:review", "mcp:github", "image:diagram.png"]);
+    expect(await p).toEqual({ kind: "submit", value: "older question" });
+  });
 });
 
 describe("lineEditor render views", () => {

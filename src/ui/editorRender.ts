@@ -70,9 +70,38 @@ function menuRowsOf(items: EditorMenuItem[]): MenuRow[] {
 
 function badgeRowsOf(badges: string[], width: number): string[] {
   if (badges.length === 0) return [];
-  return badges.flatMap((badge) =>
-    wrapTextRows(badge, width, width).map((row) => dim(row)),
-  );
+  return badges.flatMap((badge) => {
+    const rows = badge.includes("\x1b[")
+      ? [truncateStyledVisible(badge, width)]
+      : wrapTextRows(badge, width, width);
+    return rows.map((row) => dim(row));
+  });
+}
+
+function truncateStyledVisible(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (visibleWidth(text) <= maxWidth) return text;
+  if (maxWidth === 1) return "…";
+  let out = "";
+  let width = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\x1b") {
+      const match = /^\x1b\[[0-9;]*m/.exec(text.slice(i));
+      if (match) {
+        out += match[0];
+        i += match[0].length - 1;
+        continue;
+      }
+    }
+    const cp = text.codePointAt(i) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    const nextWidth = width + visibleWidth(ch);
+    if (nextWidth > maxWidth - 1) return out + "…" + "\x1b[0m";
+    out += ch;
+    width = nextWidth;
+    if (cp > 0xffff) i += 1;
+  }
+  return out;
 }
 
 export function buildRenderView(opts: RenderViewOptions): RenderView {

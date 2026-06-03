@@ -385,16 +385,16 @@ class Editor {
   private tryEnterAttachmentFocus(): boolean {
     if (this.mode === "menu" || this.mode === "pick" || this.mode === "secret") return false;
     const { skills, mcps, images } = this.attachmentGroups();
-    if (images.length > 0) {
-      this.attachmentFocus = { kind: "image", index: images.length - 1 };
-      return true;
-    }
     if (skills.length > 0) {
       this.attachmentFocus = { kind: "skill", index: skills.length - 1 };
       return true;
     }
     if (mcps.length > 0) {
       this.attachmentFocus = { kind: "mcp", index: mcps.length - 1 };
+      return true;
+    }
+    if (images.length > 0) {
+      this.attachmentFocus = { kind: "image", index: images.length - 1 };
       return true;
     }
     return false;
@@ -415,27 +415,31 @@ class Editor {
     if (!this.attachmentFocus) return false;
     const { skills, mcps, images } = this.attachmentGroups();
     if (dir < 0) {
-      if (this.attachmentFocus.kind === "image") {
-        this.clearAttachmentFocus();
-        return false;
+      if (this.attachmentFocus.kind === "skill" && mcps.length > 0) {
+        this.attachmentFocus = { kind: "mcp", index: Math.min(this.attachmentFocus.index, mcps.length - 1) };
+        return true;
       }
       if (this.attachmentFocus.kind === "skill" && images.length > 0) {
         this.attachmentFocus = { kind: "image", index: Math.min(this.attachmentFocus.index, images.length - 1) };
         return true;
       }
-      if (this.attachmentFocus.kind === "skill" && mcps.length > 0) {
-        this.attachmentFocus = { kind: "mcp", index: Math.min(this.attachmentFocus.index, mcps.length - 1) };
+      if (this.attachmentFocus.kind === "mcp" && images.length > 0) {
+        this.attachmentFocus = { kind: "image", index: Math.min(this.attachmentFocus.index, images.length - 1) };
         return true;
       }
       this.clearAttachmentFocus();
       return false;
     }
-    if (this.attachmentFocus.kind === "mcp" && skills.length > 0) {
+    if (this.attachmentFocus.kind === "image" && mcps.length > 0) {
+      this.attachmentFocus = { kind: "mcp", index: Math.min(this.attachmentFocus.index, mcps.length - 1) };
+      return true;
+    }
+    if (this.attachmentFocus.kind === "image" && skills.length > 0) {
       this.attachmentFocus = { kind: "skill", index: Math.min(this.attachmentFocus.index, skills.length - 1) };
       return true;
     }
-    if (this.attachmentFocus.kind === "skill" && images.length > 0) {
-      this.attachmentFocus = { kind: "image", index: Math.min(this.attachmentFocus.index, images.length - 1) };
+    if (this.attachmentFocus.kind === "mcp" && skills.length > 0) {
+      this.attachmentFocus = { kind: "skill", index: Math.min(this.attachmentFocus.index, skills.length - 1) };
       return true;
     }
     this.clearAttachmentFocus();
@@ -473,7 +477,7 @@ class Editor {
   private attachmentFallbackOrder(kind: AttachmentKind): AttachmentKind[] {
     switch (kind) {
       case "image":
-        return ["skill", "mcp"];
+        return ["mcp", "skill"];
       case "skill":
         return ["mcp", "image"];
       case "mcp":
