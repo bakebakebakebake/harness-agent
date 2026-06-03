@@ -13,6 +13,7 @@ export interface RenderView {
   targetCol: number;
   collapseRows: string[];
   structureKey: string;
+  preferFullRedraw?: boolean;
 }
 
 export interface RenderViewOptions {
@@ -42,6 +43,7 @@ export function changedRowIndices(prev: string[], next: string[]): number[] {
 
 export function shouldFullRedraw(prev: RenderView | null, next: RenderView): boolean {
   if (!prev) return true;
+  if (next.preferFullRedraw) return true;
   if (prev.kind !== next.kind) return true;
   if (prev.rows.length !== next.rows.length) return true;
   return prev.structureKey !== next.structureKey;
@@ -85,6 +87,7 @@ export function buildRenderView(opts: RenderViewOptions): RenderView {
       targetCol: visibleWidth("  Search: ") + visibleWidth(opts.pickQuery ?? ""),
       collapseRows,
       structureKey: `pick|items:${menu.rows.length}|search:${Boolean(opts.pickQuery)}`,
+      preferFullRedraw: true,
     };
   }
 
@@ -162,6 +165,7 @@ export function buildRenderView(opts: RenderViewOptions): RenderView {
     collapseRows,
     structureKey:
       `frame|tone:${tone}|badges:${badgeRows.length}|content:${contentRows.length}|menu:${menu.rows.length}|menuSearch:${menuSearch.length}|footer:${footerRows.length}`,
+    preferFullRedraw: opts.mode === "menu",
   };
 }
 
@@ -174,6 +178,7 @@ export function buildHintView(prompt: string, lines: string[], hint: string): Re
     targetCol: visibleWidth(promptLine),
     collapseRows: plainCollapseRows(prompt, lines, "edit"),
     structureKey: "hint|rows:2",
+    preferFullRedraw: true,
   };
 }
 

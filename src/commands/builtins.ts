@@ -7,6 +7,7 @@ import { configCommand, modelCommand, profileCommand } from "./profileCommands.j
 import {
   debugCommand,
   diffCommand,
+  imageCommand,
   searchCommand,
   skillCommand,
 } from "./interactionCommands.js";
@@ -15,6 +16,8 @@ import {
   memoryCommand,
   rememberCommand,
 } from "./memoryCommands.js";
+import { scheduleCommand } from "./scheduleCommands.js";
+import { guiCommand } from "./guiCommands.js";
 import {
   getActiveProfile,
   loadStore,
@@ -750,11 +753,13 @@ const BUILTINS: SlashCommand[] = [
   clearCommand,
   compactCommand,
   diffCommand,
+  imageCommand,
   todoCommand,
   memoryCommand,
   rememberCommand,
   forgetCommand,
   configCommand,
+  guiCommand,
   usageCommand,
   debugCommand,
   profileCommand,
@@ -762,6 +767,7 @@ const BUILTINS: SlashCommand[] = [
   mcpCommand,
   protectCommand,
   searchCommand,
+  scheduleCommand,
   thinkingCommand,
   skillCommand,
   resumeCommand,

@@ -209,6 +209,23 @@ describe("collectOnboarding model fetching (#9)", () => {
     );
     expect(result.model).toBe("deepseek-chat");
   });
+
+  it("uses the picker flow when one is available", async () => {
+    const fetch = async () => ({ models: ["model-one", "model-two"] });
+    const picks: string[] = [];
+    const result = await collectOnboarding(
+      scriptedAsk(["2", "sk-test", "https://api.example.com"]),
+      fetch,
+      async (_prompt, items) => {
+        picks.push(...items.map((item) => item.value));
+        return "model-two";
+      },
+    );
+    expect(result.model).toBe("model-two");
+    expect(picks).toContain("model-one");
+    expect(picks).toContain("model-two");
+    expect(picks).toContain("__manual__");
+  });
 });
 
 describe("applyOnboarding", () => {

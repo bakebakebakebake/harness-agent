@@ -7,6 +7,7 @@ import {
   profileToConfig,
 } from "./profiles.js";
 import type { ThinkingDepth } from "./model/types.js";
+import type { VisionMode } from "./util/images.js";
 
 /** Parse a thinking-depth string (env or stored) into a valid ThinkingDepth. */
 export function parseThinkingDepth(value: string | undefined): ThinkingDepth {
@@ -21,6 +22,17 @@ export function parseThinkingDepth(value: string | undefined): ThinkingDepth {
       return "high";
     default:
       return "off";
+  }
+}
+
+export function parseVisionMode(value: string | undefined): VisionMode {
+  switch ((value ?? "").trim().toLowerCase()) {
+    case "on":
+      return "on";
+    case "off":
+      return "off";
+    default:
+      return "auto";
   }
 }
 
@@ -145,6 +157,8 @@ export interface Config {
   memoryExtractEvery: number;
   /** Prompt budget reserved for injected memory context. */
   memoryInjectionBudget: number;
+  /** Whether image attachments are allowed for the active profile/model. */
+  visionMode?: VisionMode;
 }
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
@@ -308,6 +322,7 @@ export function loadConfig(cwd: string = process.cwd()): Config {
     memoryExtractEvery: parsePositiveInt(envValue("MEMORY_EXTRACT_EVERY")) ?? 3,
     memoryInjectionBudget:
       parsePositiveInt(envValue("MEMORY_INJECTION_BUDGET")) ?? 3000,
+    visionMode: parseVisionMode(envValue("VISION_MODE")),
     ...(envValue("THINKING")
       ? { thinkingDepth: parseThinkingDepth(envValue("THINKING")) }
       : {}),

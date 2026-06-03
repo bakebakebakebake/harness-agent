@@ -19,6 +19,8 @@ export interface ModelListResult {
   models: string[];
   /** Present when the lookup failed; the caller falls back to manual entry. */
   error?: string;
+  /** Final URL that succeeded, useful when we auto-recover to /v1. */
+  resolvedURL?: string;
 }
 
 /** How a provider's model list is fetched. Injectable so onboarding is testable. */
@@ -37,43 +39,75 @@ function trimSlashes(url: string): string {
 
 export const fetchModels: FetchModels = async (opts) => {
   try {
-    const { url, headers } =
+    const endpoint =
       opts.provider === "openai"
         ? openAIEndpoint(opts.apiKey, opts.baseURL)
         : anthropicEndpoint(opts.apiKey, opts.baseURL);
-
-    const resp = await fetch(url, {
-      method: "GET",
-      headers,
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    const { resp, resolvedURL, raw, parseError } = await fetchModelsWithFallback(
+      endpoint.url,
+      endpoint.headers,
+      opts.provider === "openai" ? opts.baseURL : undefined,
+    );
     if (!resp.ok) {
-      return { models: [], error: `HTTP ${resp.status}` };
+      return { models: [], error: `HTTP ${resp.status}`, resolvedURL };
     }
-    let json: { data?: Array<{ id?: unknown }> };
-    if (typeof resp.text === "function") {
-      const raw = await resp.text();
-      try {
-        json = JSON.parse(raw) as { data?: Array<{ id?: unknown }> };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return {
-          models: [],
-          error: `Invalid model-list JSON: ${raw.trim().slice(0, 120) || message}`,
-        };
-      }
-    } else {
-      json = (await resp.json()) as { data?: Array<{ id?: unknown }> };
+    if (parseError) {
+      return { models: [], error: parseError, resolvedURL };
     }
+    const json = raw as { data?: Array<{ id?: unknown }> };
     const models = (json.data ?? [])
       .map((m) => (typeof m.id === "string" ? m.id : ""))
       .filter((id): id is string => id.length > 0);
-    return { models };
+    return { models, resolvedURL };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { models: [], error: message };
   }
 };
+
+async function fetchModelsWithFallback(
+  url: string,
+  headers: Record<string, string>,
+  openAIBaseURL?: string,
+): Promise<{
+  resp: Response;
+  resolvedURL: string;
+  raw?: { data?: Array<{ id?: unknown }> };
+  parseError?: string;
+}> {
+  let currentURL = url;
+  let resp = await fetch(currentURL, {
+    method: "GET",
+    headers,
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  let rawText = await responseText(resp);
+
+  if (shouldRetryOpenAIModelsWithV1(openAIBaseURL, resp, rawText)) {
+    currentURL = withV1ModelsURL(openAIBaseURL!);
+    resp = await fetch(currentURL, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    rawText = await responseText(resp);
+  }
+
+  try {
+    return {
+      resp,
+      resolvedURL: currentURL,
+      raw: JSON.parse(rawText) as { data?: Array<{ id?: unknown }> },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      resp,
+      resolvedURL: currentURL,
+      parseError: `Invalid model-list JSON: ${rawText.trim().slice(0, 120) || message}`,
+    };
+  }
+}
 
 function openAIEndpoint(
   apiKey: string,
@@ -100,4 +134,38 @@ function anthropicEndpoint(
       "anthropic-version": "2023-06-01",
     },
   };
+}
+
+function shouldRetryOpenAIModelsWithV1(
+  baseURL: string | undefined,
+  resp: Response,
+  body: string,
+): boolean {
+  if (!baseURL || baseURLHasExplicitPath(baseURL)) return false;
+  if (resp.status === 404 || resp.status === 405) return true;
+  const contentType = (resp.headers.get("content-type") ?? "").toLowerCase();
+  if (contentType.includes("text/html")) return true;
+  return /<!doctype html>|<html[\s>]/i.test(body.trim());
+}
+
+function withV1ModelsURL(baseURL: string): string {
+  return `${trimSlashes(baseURL)}/v1/models`;
+}
+
+function baseURLHasExplicitPath(baseURL: string): boolean {
+  try {
+    const parsed = new URL(baseURL);
+    return parsed.pathname !== "/" && parsed.pathname !== "";
+  } catch {
+    return true;
+  }
+}
+
+async function responseText(resp: Response): Promise<string> {
+  if (typeof resp.text === "function") return await resp.text();
+  if (typeof resp.json === "function") {
+    const json = await resp.json();
+    return JSON.stringify(json);
+  }
+  return "";
 }

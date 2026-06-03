@@ -1,7 +1,7 @@
 # AGENT.md — Light-Agent 项目交接文档
 
 > 本文件用于**跨会话交接**:把项目背景、架构、进度、规划与开发约定集中记录,
-> 确保换会话后不丢失上下文。最后更新:2026-06-02。
+> 确保换会话后不丢失上下文。最后更新:2026-06-03。
 
 ---
 
@@ -12,12 +12,12 @@
   `docs/` 架构参考基础上逐步实现。
 - **入口**:`src/cli.ts`(交互式 REPL);构建后 `bin: light-agent → dist/cli.js`。
 - **运行形态**:终端 TUI——流式渲染、工具调用、权限确认、会话存档/恢复、
-  斜杠命令、`@` 文件补全、`#` skill 内联挂载、`!` shell 直通、原生记忆系统、
-  plan/allowAll 等权限模式。
+  斜杠命令、`@` 文件补全、`#` skill 内联挂载、`/image` 图片附件、`!` shell 直通、
+  原生记忆系统、本机 scheduler、macOS GUI 自动化桥接、plan/allowAll 等权限模式。
 - **语言**:TypeScript(ESM,`"type": "module"`),Node ≥ 20。
 
 ### 当前健康状态(交接时)
-- ✅ **391 个测试全部通过**,跨 **44 个测试文件**(`npm test`)。
+- ✅ **423 个测试全部通过**,跨 **47 个测试文件**(`npm test`)。
 - ✅ **`tsc --noEmit` 类型检查干净**(`npm run typecheck`)。
 - ✅ **npm 包可发布为** `light-agent-cli`,命令名为 `light-agent`。
 - ✅ **GitHub Actions CI 已接入**:`.github/workflows/ci.yml` 会在 push / PR / tag 上跑
@@ -89,16 +89,25 @@ permissions/           # 权限与安全(deny-first 纵深防御)
 ext/                   # 可扩展性(Skills / 自定义命令 / 文件搜索)
   skills.ts commands.ts paths.ts fileSearch.ts
 
+scheduler/             # 本机后台任务
+  types.ts store.ts    #   job store / pid / run log / schedule 计算
+  runner.ts            #   detached runner + job 执行
+
+gui/                   # macOS GUI 自动化白名单后端
+  macos.ts             #   Finder / Notes / Safari / System Events 脚本桥接
+
 commands/              # 斜杠命令
   registry.ts          #   slash 菜单排序、dispatch、命令元信息
   builtins.ts          #   核心命令集合与 registry 组装
   interactionCommands.ts # /diff /search /skill /debug 等高交互命令
   memoryCommands.ts    # /memory /remember /forget
   profileCommands.ts   # /profile /model /config
+  scheduleCommands.ts  # /schedule
+  guiCommands.ts       # /gui
 
 ui/                    # 终端 UX(零依赖 ANSI)
   cli 渲染、输入、主题、frame、状态行 等(见下)
-util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、logger.ts、errors.ts
+util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、images.ts、logger.ts、errors.ts
 ```
 
 ### 核心数据流
@@ -160,21 +169,24 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、logger
 ### 工具(`src/tools/`)
 `read` · `ls` · `grep` · `glob` · `edit` · `write` · `bash` · `shell` · `subagent`
 · `todo_read` · `todo_write` · `memory_search` · `memory_write` · `memory_update`
-· `memory_forget` · `memory_drill` · `mcp_search`。每个工具声明 `riskLevel`
+· `memory_forget` · `memory_drill` · `mcp_search` · `web_search` · `web_fetch`
+· `macos_gui`。每个工具声明 `riskLevel`
 (low/medium/high)与 `concurrency`(concurrent/exclusive)。所有文件系统工具经
 `resolveInWorkdir()` 做 workdir 限制(唯一的 confinement 边界)。
 
 ### 斜杠命令(`src/commands/`)
 当前常用命令包含:`/help` `/clear` `/exit` `/keys` `/usage` `/compact` `/diff`
 `/config` `/mode` `/model` `/thinking` `/profile`(`/profiles`) `/rename`
-`/reload` `/resume` `/rewind` `/skill` `/todo` `/mcp` `/search` `/debug`
-`/memory` `/remember` `/forget` `/protect`。
+`/reload` `/resume` `/rewind` `/skill` `/image` `/todo` `/mcp` `/search`
+`/debug` `/memory` `/remember` `/forget` `/protect` `/schedule` `/gui`。
 
 当前分层:
 - `builtins.ts` 负责 registry 组装和通用命令。
 - `interactionCommands.ts` 负责 `/diff`、`/search`、`/skill`、`/debug`。
 - `memoryCommands.ts` 负责 `/memory`、`/remember`、`/forget`。
 - `profileCommands.ts` 负责 `/profile`、`/model`、`/config`。
+- `scheduleCommands.ts` 负责 `/schedule`。
+- `guiCommands.ts` 负责 `/gui`。
 
 ### 输入与交互(UI)
 - `/` 命令菜单(支持搜索、排序权重、回车直接执行)、`@` 文件补全菜单、`#` skill
@@ -184,12 +196,16 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、logger
   `skills:` 标记显示在输入框中,只作用于下一条消息。`#` 内联挂载与 `/skill`
   共享同一条挂载路径,会在当前输入轮次里立刻刷新 badge。`/skill` picker 也能
   直接移除单个已挂载 skill 或一键清空。
+- `/image` 支持本地图片、拖拽路径和 `/image paste` 剪贴板桥接。已选图片会以
+  `images:` 标记显示在输入框中,并和 skill / MCP 共用附件导航与回删逻辑。
 - `/diff` 先列 changed files,再 drill-down 到单文件 patch;当前会先显示 overview,
   看完 patch 后可直接回到文件列表或退出。
 - `/search` 走 Tavily 优先 / Bing 降级,会返回来源、backend、URL、摘要,并可继续抓取正文。
 - DeepSeek V4 的 thinking 现已接入官方 `thinking` + `reasoning_effort` 语义;
   当前 CLI 的 `high` 会映射到 DeepSeek 的最高档 `max`,并在不兼容网关上自动回退。
 - `/mcp` 会显示 configured / connected / loaded-tool 状态。
+- `/schedule` 已支持 `once` / `daily` / `weekly` 三种本机后台任务。
+- `/gui` 提供 macOS GUI 自动化能力清单与 doctor;模型侧通过 `macos_gui` 工具触发。
 - `/protect` 可维护 repo 级 blocked commands 与 protected paths,只拦模型动作。
 - 流式渲染 + markdown + 工具调用行 + spinner;确认流带 diff 预览。
 - `lineEditor.ts` 已承载 picker、rewind、interrupt、seed 回填等输入态切换。

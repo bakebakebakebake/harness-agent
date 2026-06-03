@@ -1,6 +1,7 @@
 import type { CommandContext, PickItem, SlashCommand } from "./registry.js";
 import { contextWindowFor } from "../model/contextWindow.js";
 import { modelHint, selectModel } from "../model/selection.js";
+import { smokeTestModel } from "../model/smoke.js";
 import { collectOnboarding } from "../onboarding.js";
 import { globalEnvPath, writeGlobalEnvEntries } from "../config.js";
 import {
@@ -154,6 +155,7 @@ export const configCommand: SlashCommand = {
       `  ${dim("model")}    ${config.model}`,
       `  ${dim("baseURL")}  ${config.baseURL ?? dim("(default)")}`,
       `  ${dim("context")}  ${ctxLabel}`,
+      `  ${dim("vision")}   ${config.visionMode ?? "auto"}`,
       `  ${dim("apiKey")}   ${maskKey(config.apiKey)}`,
     ];
     ctx.out(lines.join("\n"));
@@ -320,7 +322,7 @@ async function profileUse(
 }
 
 async function profileNew(ctx: CommandContext): Promise<{ exit?: boolean }> {
-  const result = await collectOnboarding(ctx.ask);
+  const result = await collectOnboarding(ctx.ask, undefined, ctx.pick);
   if (!result.entries.ANTHROPIC_API_KEY && !result.entries.OPENAI_API_KEY) {
     ctx.out(yellow("  No API key entered — profile not created."));
     return {};
@@ -498,7 +500,39 @@ export const modelCommand: SlashCommand = {
   description: "Show, pick, or set the active model",
   keywords: ["llm", "engine"],
   priority: 135,
+  subcommands: ["test"],
   async run(ctx, args) {
+    if ((args[0] ?? "").trim().toLowerCase() === "test") {
+      const candidate = args.slice(1).join(" ").trim() || ctx.state.config.model;
+      ctx.out(dim(`  Testing model "${candidate}"...`));
+      const result = await smokeTestModel(ctx.state.config, { model: candidate });
+      ctx.out(`  ${dim("provider")} ${result.provider}`);
+      ctx.out(`  ${dim("model")}    ${result.model}`);
+      if (result.baseURL) ctx.out(`  ${dim("baseURL")}  ${result.baseURL}`);
+      if (result.catalogResolvedURL) ctx.out(`  ${dim("catalogURL")} ${result.catalogResolvedURL}`);
+      ctx.out(
+        `  ${dim("catalog")}  ` +
+          (result.catalogOk
+            ? green(`ok (${result.catalogCount ?? 0} models visible)`)
+            : red(result.catalogError ?? "failed")),
+      );
+      ctx.out(
+        `  ${dim("stream")}   ` +
+          (result.streamOk
+            ? green(`ok ${result.outputText ? `→ ${result.outputText}` : ""}`.trim())
+            : red(result.streamError ?? "empty response")),
+      );
+      if (result.stopReason) ctx.out(`  ${dim("stop")}     ${result.stopReason}`);
+      if (result.usage) {
+        ctx.out(
+          `  ${dim("usage")}    ${result.usage.inputTokens} in ${symbols.dot} ${result.usage.outputTokens} out`,
+        );
+      }
+      if (!result.streamOk) {
+        ctx.out(dim("  Tip: if catalog or stream returns HTML, your baseURL is likely pointing at a website page instead of a real /v1 API endpoint."));
+      }
+      return {};
+    }
     const value = args.join(" ").trim();
     if (!value) {
       const currentProfile = getActiveProfile(loadStore());

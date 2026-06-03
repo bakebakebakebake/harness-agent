@@ -1,5 +1,5 @@
 const DEFAULT_USER_AGENT =
-  "Mozilla/5.0 (compatible; Light-Agent/0.4; +https://github.com/bakebakebakebake/light-agent)";
+  "Mozilla/5.0 (compatible; Light-Agent/0.5; +https://github.com/bakebakebakebake/light-agent)";
 
 export type SearchBias = "general" | "technical" | "recent";
 export type SearchBackend = "auto" | "tavily" | "bing";

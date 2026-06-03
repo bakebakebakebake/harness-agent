@@ -103,7 +103,7 @@ class ServerConnection {
       } as Record<string, string>,
     });
     this.transport = transport;
-    this.client = new Client({ name: "light-agent", version: "0.4.3" });
+    this.client = new Client({ name: "light-agent", version: "0.5.0" });
     await this.client.connect(transport);
     this.connected = true;
     return this.client;

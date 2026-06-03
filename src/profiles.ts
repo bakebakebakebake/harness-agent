@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.js";
 import type { ThinkingDepth } from "./model/types.js";
+import type { VisionMode } from "./util/images.js";
 
 /**
  * Global profile store (docs/06).
@@ -40,6 +41,8 @@ export interface Profile {
   contextWindow?: number;
   /** Recently-selected model ids, newest first (feature #8). Bounded length. */
   recentModels?: string[];
+  /** Image-input policy for the profile. */
+  visionMode?: VisionMode;
 }
 
 /** How many recent model ids to retain per profile. */
@@ -189,6 +192,7 @@ export function profileToConfig(profile: Profile, cwd: string): Config {
     ...(profile.baseURL ? { baseURL: profile.baseURL } : {}),
     ...(profile.thinkingDepth ? { thinkingDepth: profile.thinkingDepth } : {}),
     ...(profile.contextWindow ? { contextWindow: profile.contextWindow } : {}),
+    ...(profile.visionMode ? { visionMode: profile.visionMode } : {}),
     workdir: cwd,
     maxTurns: 50,
     bashTimeoutMs: 120_000,

@@ -27,10 +27,18 @@ export type Role = "user" | "assistant";
  *    DeepSeek's highest official tier.
  */
 export type ThinkingDepth = "off" | "low" | "medium" | "high";
+export type ImageSource = "file" | "drop" | "clipboard";
 
 /** A block of content within a message. */
 export type ContentBlock =
   | { type: "text"; text: string }
+  | {
+      type: "image";
+      path: string;
+      mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+      source: ImageSource;
+      alt?: string;
+    }
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | {
       type: "tool_result";

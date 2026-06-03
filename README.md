@@ -10,6 +10,8 @@ A local-first coding agent CLI with:
 - todo tracking
 - shell, subagent, MCP, and web search support
 - inline `#skill` attach, repo protection rules, and Tavily-first search
+- multimodal image input from files, drag-drop paths, and clipboard paste
+- local scheduled jobs and macOS GUI automation hooks
 
 ## Requirements
 
@@ -76,13 +78,17 @@ Useful commands inside the app:
 - `/forget`
 - `/profile`
 - `/model`
+- `/model test`
 - `/mode`
 - `/diff`
 - `/resume`
 - `/rewind`
 - `/skill`
+- `/image`
 - `/debug`
 - `/mcp`
+- `/schedule`
+- `/gui`
 - `/usage`
 - `/protect`
 - `/config search`
@@ -95,12 +101,24 @@ Useful commands inside the app:
   skill, keep typing, and the current draft keeps a visible `skills:` badge.
   Inline `#skill` picks and `/skill` picks now share the same badge path, so
   both appear immediately in the current draft.
+- `/image add <path>` attaches a local image to the next message, `/image paste`
+  imports the current macOS clipboard image, `cmd+v` can attach an image-only
+  clipboard directly, and Finder drag-drop paths are recognized as image
+  attachments instead of plain text. Direct image paths inside a prompt are
+  also extracted before submit, so a message like
+  `"/Users/me/Pictures/demo.png what is in this image?"` sends the image plus
+  the remaining text together. Attached images appear in the draft as an
+  `images:` badge and can be removed with the same empty `Backspace` /
+  attachment-focus flow as skills and MCP hints.
+- `/image` without arguments now opens a picker with paste / list / remove /
+  clear actions plus detected project images, so you usually do not need to
+  remember subcommands first.
 - When the draft is empty, `Backspace` now removes attached next-turn items one
-  by one in reverse order, across both queued skills and queued MCP server
-  hints.
+  by one in reverse order, across queued images, skills, and MCP server hints.
 - If the draft already has text, `↑` now steps into the attached `skills:` and
-  `mcp:` rows before history recall. Inside those rows, `←` / `→` moves across
-  attached items and `Backspace` removes the highlighted one.
+  `mcp:` rows before history recall. Image attachments join the same inline
+  navigation flow. Inside those rows, `←` / `→` moves across attached items and
+  `Backspace` removes the highlighted one.
 - `/skill` opens the same searchable picker, and also supports
   `/skill list`, `/skill enable <name>`, `/skill disable <name>`, and
   `/skill clear`. The no-arg picker now goes straight to available skills and
@@ -120,6 +138,15 @@ Useful commands inside the app:
   `~/.light-agent/env`.
 - `/config` and `/config search` both support picker flows in TTY mode, so you
   can choose search backend / key actions without memorizing every subcommand.
+- `/model test` runs a quick smoke test against the current OpenAI/Anthropic
+  config: it checks model catalog discovery and then asks the configured model
+  to reply with a tiny fixed answer. This is the fastest way to tell whether a
+  model/baseURL pair is really usable.
+- For OpenAI-compatible setups, if `baseURL` points at a website root such as
+  `https://host.example` and that root returns HTML, Light-Agent now retries
+  the standard `/v1/...` API path automatically for both model discovery and
+  streaming. `/model test` shows the resolved catalog URL so this recovery is
+  visible.
 - `!` commands now run in the real foreground TTY through your login +
   interactive shell, so aliases such as `ll` work more like your local
   terminal. Foreground execution now avoids the job-control path that could
@@ -127,6 +154,17 @@ Useful commands inside the app:
 - `/mcp` shows configured servers plus live connection / loaded-tool state, and
   `/mcp` or `/mcp use <server>` attaches that server to the next message with a
   visible `mcp:` badge.
+- `/schedule` manages local background jobs. First version supports `once`,
+  `daily`, and `weekly` schedules, persists jobs under `~/.light-agent`, and
+  runs them through a detached local runner.
+- `/schedule` without arguments now opens a picker-first flow: add a job, check
+  runner status, or pick an existing job and choose `show / run-now / pause /
+  resume / remove`.
+- `/gui` lists the supported macOS GUI actions, and the `macos_gui` tool gives
+  the model a structured Finder / Notes / Safari / System Events bridge behind
+  the usual confirmation gate.
+- `/gui` without arguments also starts from a picker, so you can jump to action
+  list, app list, or doctor output directly.
 - `/protect` lets you block risky model-side command patterns and protect repo
   paths from accidental edits or destructive shell calls.
 - `/debug on` writes structured logs to `~/.light-agent/logs/light-agent.log`
@@ -182,6 +220,45 @@ The actual search key name is still:
 TAVILY_API_KEY
 ```
 
+## Images, Scheduler, and GUI
+
+Image input supports four entry points:
+
+- `/image add <path>`
+- `/image paste`
+- Finder drag-drop of local image paths into the prompt
+- image-only turns, as long as at least one image is attached
+
+Notes:
+
+- Clipboard import currently uses a macOS clipboard bridge and writes temporary
+  PNG files under `~/.light-agent/tmp/images/`.
+- The active profile can control image sending with `visionMode=auto|on|off`.
+- In `auto`, the CLI blocks image sends when the selected model does not look
+  vision-capable.
+
+Scheduler commands:
+
+- `/schedule`
+- `/schedule add`
+- `/schedule list`
+- `/schedule show <id>`
+- `/schedule remove <id>`
+- `/schedule pause <id>`
+- `/schedule resume <id>`
+- `/schedule run-now <id>`
+- `/schedule status`
+- `/schedule stop-runner`
+
+GUI commands:
+
+- `/gui`
+- `/gui list`
+- `/gui apps`
+- `/gui doctor`
+
+The scheduler stores jobs, logs, and pid state under `~/.light-agent/scheduler/`.
+
 ## Memory
 
 Light-Agent now includes a native memory system with:
@@ -233,6 +310,8 @@ If you want a full example-driven walkthrough, see:
 
 - [docs/12-memory-system.md](docs/12-memory-system.md)
 - [docs/13-interaction-and-search.md](docs/13-interaction-and-search.md)
+- [docs/14-multimodal-and-image-input.md](docs/14-multimodal-and-image-input.md)
+- [docs/15-scheduler-and-gui-automation.md](docs/15-scheduler-and-gui-automation.md)
 
 ## License
 

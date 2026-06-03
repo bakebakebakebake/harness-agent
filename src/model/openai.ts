@@ -9,6 +9,7 @@ import type {
   ToolSpec,
   Usage,
 } from "./types.js";
+import { readImageAsBase64 } from "../util/images.js";
 
 /**
  * OpenAI-compatible provider — a native streaming adapter. See docs/06.
@@ -87,6 +88,15 @@ export class OpenAIProvider implements ModelProvider {
 
     if (!resp.ok || !resp.body) {
       let text = await safeText(resp);
+      if (shouldRetryWithV1Base(this.baseURL, resp.status, text, resp.headers.get("content-type"))) {
+        try {
+          resp = await postJson(`${withV1BaseURL(this.baseURL)}/chat/completions`, this.apiKey, body, req.signal);
+          text = resp.ok && resp.body ? "" : await safeText(resp);
+        } catch (err) {
+          yield { type: "error", error: normalizeError(err) };
+          return;
+        }
+      }
       if (deepSeekThinking && shouldRetryWithoutDeepSeekThinking(resp.status, text)) {
         const retryBody = { ...body };
         delete retryBody.thinking;
@@ -116,10 +126,54 @@ export class OpenAIProvider implements ModelProvider {
       return;
     }
 
+    const contentType = (resp.headers.get("content-type") ?? "").toLowerCase();
+    if (!contentType.includes("text/event-stream")) {
+      const text = await safeText(resp);
+      if (shouldRetryWithV1Base(this.baseURL, resp.status, text, contentType)) {
+        try {
+          resp = await postJson(`${withV1BaseURL(this.baseURL)}/chat/completions`, this.apiKey, body, req.signal);
+        } catch (err) {
+          yield { type: "error", error: normalizeError(err) };
+          return;
+        }
+      } else {
+        yield {
+          type: "error",
+          error: {
+            message:
+              `Expected a streaming OpenAI-compatible response from ${this.baseURL}/chat/completions, ` +
+              `but received ${contentType || "an unknown content type"} instead. ` +
+              summarizeUnexpectedBody(text),
+            retryable: false,
+          },
+        };
+        return;
+      }
+    }
+
+    const retriedContentType = (resp.headers.get("content-type") ?? "").toLowerCase();
+    if (!retriedContentType.includes("text/event-stream")) {
+      const text = await safeText(resp);
+      yield {
+        type: "error",
+        error: {
+          message:
+            `Expected a streaming OpenAI-compatible response from ${resp.url || `${this.baseURL}/chat/completions`}, ` +
+            `but received ${retriedContentType || "an unknown content type"} instead. ` +
+            summarizeUnexpectedBody(text),
+          retryable: false,
+        },
+      };
+      return;
+    }
+
     // Per-stream accumulator state, kept local to avoid cross-call leakage.
     const state = new StreamState();
+    let sawData = false;
+    const responseBody = resp.body!;
     try {
-      for await (const data of sseLines(resp.body)) {
+      for await (const data of sseLines(responseBody)) {
+        sawData = true;
         if (data === "[DONE]") break;
         let chunk: OpenAIChunk;
         try {
@@ -128,6 +182,18 @@ export class OpenAIProvider implements ModelProvider {
           continue; // ignore keep-alive / non-JSON lines
         }
         for (const ev of state.consume(chunk)) yield ev;
+      }
+      if (!sawData) {
+        yield {
+          type: "error",
+          error: {
+            message:
+              `The OpenAI-compatible endpoint returned an empty streaming body for model "${this.model}". ` +
+              "This usually means the base URL is not pointing at a real /v1 API endpoint, or the proxy does not support this model.",
+            retryable: false,
+          },
+        };
+        return;
       }
       for (const ev of state.finish()) yield ev;
     } catch (err) {
@@ -249,6 +315,41 @@ function shouldRetryWithoutDeepSeekThinking(status: number, detail: string): boo
   );
 }
 
+function summarizeUnexpectedBody(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "The body was empty.";
+  if (/<!doctype html>|<html[\s>]/i.test(trimmed)) {
+    return "The server returned HTML, which usually means this base URL points at a website page instead of an OpenAI-compatible API endpoint.";
+  }
+  return `Response preview: ${trimmed.slice(0, 180)}`;
+}
+
+function withV1BaseURL(baseURL: string): string {
+  return baseURL.replace(/\/+$/, "") + "/v1";
+}
+
+function shouldRetryWithV1Base(
+  baseURL: string,
+  status: number,
+  body: string,
+  contentType: string | null,
+): boolean {
+  if (baseURLHasExplicitPath(baseURL)) return false;
+  if (status === 404 || status === 405) return true;
+  const normalizedContentType = (contentType ?? "").toLowerCase();
+  if (normalizedContentType.includes("text/html")) return true;
+  return /<!doctype html>|<html[\s>]/i.test(body.trim());
+}
+
+function baseURLHasExplicitPath(baseURL: string): boolean {
+  try {
+    const parsed = new URL(baseURL);
+    return parsed.pathname !== "/" && parsed.pathname !== "";
+  } catch {
+    return true;
+  }
+}
+
 // PLACEHOLDER_STATE
 
 /**
@@ -361,7 +462,15 @@ export class StreamState {
 /** OpenAI chat message shapes we produce. */
 type OpenAIMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | {
+      role: "user";
+      content:
+        | string
+        | Array<
+            | { type: "text"; text: string }
+            | { type: "image_url"; image_url: { url: string } }
+          >;
+    }
   | {
       role: "assistant";
       content: string | null;
@@ -423,10 +532,12 @@ export function toOpenAIMessages(
 
     // role === "user": may carry plain text and/or tool_result blocks.
     const texts: string[] = [];
+    const images: Array<Extract<ContentBlock, { type: "image" }>> = [];
     const toolResults: Array<Extract<ContentBlock, { type: "tool_result" }>> =
       [];
     for (const b of m.content) {
       if (b.type === "text") texts.push(b.text);
+      else if (b.type === "image") images.push(b);
       else if (b.type === "tool_result") toolResults.push(b);
     }
     // Tool results must precede any subsequent assistant turn; emit them first.
@@ -437,8 +548,24 @@ export function toOpenAIMessages(
         content: r.content,
       });
     }
-    if (texts.length > 0) {
-      out.push({ role: "user", content: texts.join("") });
+    const joined = texts.join("");
+    if (images.length > 0) {
+      const content: Array<
+        | { type: "text"; text: string }
+        | { type: "image_url"; image_url: { url: string } }
+      > = [];
+      if (joined.length > 0) content.push({ type: "text", text: joined });
+      for (const image of images) {
+        content.push({
+          type: "image_url",
+          image_url: {
+            url: `data:${image.mimeType};base64,${readImageAsBase64(image.path)}`,
+          },
+        });
+      }
+      out.push({ role: "user", content });
+    } else if (joined.length > 0) {
+      out.push({ role: "user", content: joined });
     }
   }
 

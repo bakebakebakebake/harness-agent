@@ -70,12 +70,16 @@ export interface LineReaderOptions {
   skillMenu?: (query: string) => MenuItem[] | null;
   /** Called when a `#` skill is attached inline to the current draft. */
   attachSkill?: (skillName: string) => void;
+  /** Called when an image-only paste should attach the current clipboard image. */
+  attachClipboardImage?: () => void;
+  /** Called when a pasted/dragged image path should attach images instead of plain text. */
+  attachDroppedImages?: (text: string) => boolean;
   /** Called when the user backspaces an empty draft to drop the last attached item. */
   detachLastSkill?: () => boolean;
   /** Current next-turn attachment labels grouped by kind. */
-  attachments?: () => { skills: string[]; mcps: string[] };
+  attachments?: () => { skills: string[]; mcps: string[]; images: string[] };
   /** Remove one attached item by kind + label. */
-  detachAttachment?: (kind: "skill" | "mcp", label: string) => boolean;
+  detachAttachment?: (kind: "skill" | "mcp" | "image", label: string) => boolean;
   /** Session-plan-mode probe; tints the input frame cyan (#8/#9). */
   planMode?: () => boolean;
   /** Persistent footer row (workdir + branch) beneath the frame (#10). */
@@ -161,6 +165,8 @@ export class LineReader {
       ...(fileMenu ? { fileMenu } : {}),
       ...(skillMenu ? { skillMenu } : {}),
       ...(this.opts.attachSkill ? { attachSkill: this.opts.attachSkill } : {}),
+      ...(this.opts.attachClipboardImage ? { attachClipboardImage: this.opts.attachClipboardImage } : {}),
+      ...(this.opts.attachDroppedImages ? { attachDroppedImages: this.opts.attachDroppedImages } : {}),
       ...(this.opts.detachLastSkill ? { detachLastSkill: this.opts.detachLastSkill } : {}),
       ...(this.opts.attachments ? { attachments: this.opts.attachments } : {}),
       ...(this.opts.detachAttachment ? { detachAttachment: this.opts.detachAttachment } : {}),

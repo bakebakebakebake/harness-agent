@@ -32,6 +32,9 @@ function flattenMessage(message: Message): string {
   return message.content
     .map((block) => {
       if (block.type === "text") return block.text;
+      if (block.type === "image") {
+        return `[image:${block.source}] ${block.path}`;
+      }
       if (block.type === "tool_use") {
         return `[tool:${block.name}] ${JSON.stringify(block.input)}`;
       }

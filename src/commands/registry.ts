@@ -299,6 +299,19 @@ export class CommandRegistry {
   }
 
   /**
+   * Whether a line currently resolves to a registered slash command name.
+   * Used by the CLI to avoid treating absolute file paths such as "/Users/..."
+   * as commands while still preserving unknown-command errors for real slash
+   * command typos.
+   */
+  hasCommand(line: string): boolean {
+    if (!line.startsWith("/")) return false;
+    const trimmed = line.trim().replace(/^\//, "");
+    const name = trimmed.split(/\s+/).filter(Boolean)[0] ?? "";
+    return this.byName.has(name);
+  }
+
+  /**
    * Parse and run a "/command args…" line. Returns the command's result, or a
    * plain `{}` after reporting an unknown command. The leading "/" is optional
    * in `line` (cli passes the raw input).

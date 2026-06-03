@@ -44,8 +44,17 @@ import { writeCoreDigest } from "./memory/digest.js";
 import { logger } from "./util/logger.js";
 import { classifyRuntimeError } from "./util/errors.js";
 import {
+  consumeImagePathsFromText,
+  detectDroppedImagePaths,
+  enforceVisionMode,
+  importClipboardImage,
+} from "./util/images.js";
+import { runSchedulerDaemon } from "./scheduler/runner.js";
+import {
   attachmentBadges,
   groupPendingAttachments,
+  imageAttachment,
+  pendingUserContent,
   popPendingAttachment,
   pushPendingAttachment,
   removePendingAttachment,
@@ -124,6 +133,20 @@ async function main(): Promise<void> {
       if (!skill) return;
       attachSkillToState(state, skill);
     },
+    attachClipboardImage: () => {
+      const image = importClipboardImage();
+      pushPendingAttachment(state, imageAttachment(image));
+      state.seedInput ??= "";
+    },
+    attachDroppedImages: (text) => {
+      const images = detectDroppedImagePaths(text, state.config.workdir);
+      if (images.length === 0) return false;
+      for (const image of images) {
+        pushPendingAttachment(state, imageAttachment(image));
+      }
+      state.seedInput ??= "";
+      return true;
+    },
     badges: () => attachmentBadges(state.pendingAttachments),
     detachLastSkill: () => detachLastPendingAttachment(state),
     attachments: () => groupPendingAttachments(state.pendingAttachments),
@@ -153,7 +176,7 @@ async function main(): Promise<void> {
         dim(`  (Saved to ${storePath()}, locked to your user.)\n\n`),
     );
     try {
-      const result = await collectOnboarding(ask);
+      const result = await collectOnboarding(ask, undefined, (prompt, items) => reader.pick(prompt, items));
       if (!result.entries.ANTHROPIC_API_KEY && !result.entries.OPENAI_API_KEY) {
         stdout.write("\n  No API key entered. Exiting — run again when ready.\n");
         reader.close();
@@ -404,10 +427,21 @@ async function main(): Promise<void> {
     const seed = state.seedInput ?? seedNext;
     state.seedInput = undefined;
     seedNext = undefined;
-    let input = (await reader.ask(cyan(symbols.arrow) + " ", seed)).trim();
+    const rawInput = await reader.ask(cyan(symbols.arrow) + " ", seed);
+    let input = rawInput.trim();
+    if (!commands.hasCommand(input)) {
+      const inlineImages = consumeImagePathsFromText(input, state.config.workdir);
+      if (inlineImages.images.length > 0) {
+        for (const image of inlineImages.images) {
+          pushPendingAttachment(state, imageAttachment(image));
+        }
+        input = inlineImages.text;
+      }
+    }
+    const hasImageOnlyDraft = state.pendingAttachments.some((item) => item.kind === "image");
     // Double Ctrl-C on an empty prompt asks to quit (#7).
     if (reader.exitRequested) break;
-    if (input === "") continue;
+    if (input === "" && !hasImageOnlyDraft) continue;
 
     // `!`-prefix: run the rest as a shell command and bypass the model (#5).
     // The human typed it, so it runs through their shell (pipes/globs work) —
@@ -468,12 +502,23 @@ async function main(): Promise<void> {
         )
       : "";
     const extraContext = state.pendingContext;
+    const turnAttachments = [...state.pendingAttachments];
+    const userContent = pendingUserContent(input, turnAttachments);
+    const userImages = userContent.filter(
+      (block): block is Extract<Message["content"][number], { type: "image" }> => block.type === "image",
+    );
     state.pendingContext = [];
     state.pendingAttachments = [];
     const system = appendPromptBlocks(
       systemPrompt(state.config.workdir, state.skillCatalog),
       [memoryBlock, ...extraContext],
     );
+    try {
+      enforceVisionMode(state.config, userImages);
+    } catch (err) {
+      stdout.write(red(`  ${(err as Error).message}\n\n`));
+      continue;
+    }
 
     try {
       for await (const ev of runAgentLoop({
@@ -481,6 +526,7 @@ async function main(): Promise<void> {
         registry,
         system,
         userInput: input,
+        ...(userContent.length > 0 ? { userContent } : {}),
         history: state.history,
         maxTurns: state.config.maxTurns,
         workdir: state.config.workdir,
@@ -553,6 +599,16 @@ async function main(): Promise<void> {
       `Bye. Session: ${state.session.title} (${state.session.id.slice(0, 8)})\n`,
     ),
   );
+}
+
+async function runInternalCommand(argv: string[]): Promise<boolean> {
+  const [subcommand, ...rest] = argv;
+  if (subcommand !== "internal-run-scheduler") return false;
+  const once = rest.includes("--once");
+  const jobFlag = rest.findIndex((item) => item === "--job");
+  const onlyJobId = jobFlag >= 0 ? rest[jobFlag + 1] : undefined;
+  await runSchedulerDaemon({ once, ...(onlyJobId ? { onlyJobId } : {}) });
+  return true;
 }
 
 /** Fraction of the context window at which auto-compaction kicks in (#1). */
@@ -690,10 +746,15 @@ process.on("uncaughtException", (err) => {
   });
 });
 
-main().catch((err) => {
-  logger.error("fatal startup error", {
-    error: (err as Error).stack ?? (err as Error).message,
+runInternalCommand(process.argv.slice(2))
+  .then((handled) => {
+    if (handled) return;
+    return main();
+  })
+  .catch((err) => {
+    logger.error("fatal startup error", {
+      error: (err as Error).stack ?? (err as Error).message,
+    });
+    process.stderr.write("Fatal: " + classifyRuntimeError(err as Error) + "\n");
+    process.exit(1);
   });
-  process.stderr.write("Fatal: " + classifyRuntimeError(err as Error) + "\n");
-  process.exit(1);
-});

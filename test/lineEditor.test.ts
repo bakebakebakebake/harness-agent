@@ -155,6 +155,23 @@ describe("lineEditor attached-skill backspace removal", () => {
   });
 });
 
+describe("lineEditor clipboard image paste", () => {
+  it("attaches the clipboard image on an empty paste event", async () => {
+    const keys = new FakeKeys();
+    let attached = 0;
+    const p = run(keys, {
+      attachClipboardImage: () => {
+        attached++;
+      },
+    });
+    keys.send("paste", { sequence: "\x1b[200~\x1b[201~" });
+    keys.type("done");
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "done" });
+    expect(attached).toBe(1);
+  });
+});
+
 describe("lineEditor double Esc rewind", () => {
   it("submits /rewind after two Esc presses on an empty prompt", async () => {
     const keys = new FakeKeys();
@@ -345,13 +362,19 @@ describe("lineEditor inline skill badges", () => {
     const keys = new FakeKeys();
     const removed: string[] = [];
     const attachments = {
+      images: [] as string[],
       skills: ["review", "docs"],
       mcps: ["github"],
     };
     const p = run(keys, {
       attachments: () => attachments,
-      detachAttachment: (kind: "skill" | "mcp", label: string) => {
-        const list = kind === "skill" ? attachments.skills : attachments.mcps;
+      detachAttachment: (kind: "skill" | "mcp" | "image", label: string) => {
+        const list =
+          kind === "skill"
+            ? attachments.skills
+            : kind === "mcp"
+              ? attachments.mcps
+              : attachments.images;
         const idx = list.indexOf(label);
         if (idx === -1) return false;
         list.splice(idx, 1);
@@ -462,7 +485,7 @@ describe("lineEditor render views", () => {
 });
 
 describe("lineEditor TTY redraws", () => {
-  it("anchors redraws with save/restore cursor sequences", async () => {
+  it("anchors redraws by moving back to the region top from the current cursor", async () => {
     const chunks: string[] = [];
     writeSpy.mockImplementation(((chunk: string | Uint8Array) => {
       chunks.push(String(chunk));
@@ -472,16 +495,18 @@ describe("lineEditor TTY redraws", () => {
     const keys = new TtyKeys();
     const p = run(keys);
 
-    expect(chunks.join("")).toContain("\x1b7");
+    expect(chunks.join("")).toContain("\x1b[J");
     chunks.length = 0;
     keys.type("a");
-    expect(chunks.join("")).toContain("\x1b8");
+    expect(chunks.join("")).toContain("\r");
+    expect(chunks.join("")).not.toContain("\x1b7");
+    expect(chunks.join("")).not.toContain("\x1b8");
 
     keys.send("return");
     await p;
   });
 
-  it("full redraws on menu open but not on menu navigation", async () => {
+  it("full redraws on menu open and on menu navigation for stability", async () => {
     const chunks: string[] = [];
     writeSpy.mockImplementation(((chunk: string | Uint8Array) => {
       chunks.push(String(chunk));
@@ -506,7 +531,7 @@ describe("lineEditor TTY redraws", () => {
 
     chunks.length = 0;
     keys.send("down");
-    expect(chunks.join("")).not.toContain("\x1b[J");
+    expect(chunks.join("")).toContain("\x1b[J");
 
     chunks.length = 0;
     keys.send("return");

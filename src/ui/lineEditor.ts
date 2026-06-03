@@ -74,12 +74,16 @@ export interface EditorOptions {
   skillMenu?: (query: string) => EditorMenuItem[] | null;
   /** Called when a skill is attached inline through the `#` picker. */
   attachSkill?: (skillName: string) => void;
+  /** Called when an image-only paste should attach the current clipboard image. */
+  attachClipboardImage?: () => void;
+  /** Called when pasted/dragged text should be consumed as image attachments. */
+  attachDroppedImages?: (text: string) => boolean;
   /** Called when backspacing an empty draft should drop the last attached skill. */
   detachLastSkill?: () => boolean;
   /** Current next-turn attachments grouped by kind for inline navigation. */
-  attachments?: () => { skills: string[]; mcps: string[] };
+  attachments?: () => { skills: string[]; mcps: string[]; images: string[] };
   /** Remove one attached item by kind + label. */
-  detachAttachment?: (kind: "skill" | "mcp", label: string) => boolean;
+  detachAttachment?: (kind: "skill" | "mcp" | "image", label: string) => boolean;
   /**
    * Fixed picker list. When set, the editor runs in "pick" mode: arrows select,
    * Enter resolves the chosen value, Esc/Ctrl-C resolves null. No free typing.
@@ -119,7 +123,7 @@ export function runEditor(opts: EditorOptions): Promise<EditorResult> {
 type Mode = "edit" | "menu" | "pick" | "secret";
 export { buildHintView, buildRenderView, changedRowIndices, shouldFullRedraw, wrapTextRows };
 
-type AttachmentKind = "skill" | "mcp";
+type AttachmentKind = "image" | "skill" | "mcp";
 
 interface AttachmentFocus {
   kind: AttachmentKind;
@@ -188,7 +192,6 @@ class Editor {
   attach(): void {
     process.on("SIGWINCH", this.onTerminalRefresh);
     process.on("SIGCONT", this.onTerminalRefresh);
-    this.captureRegionAnchor();
     this.draw();
     this.opts.keys.onKey((str, key) => this.onKey(str, key));
   }
@@ -244,6 +247,18 @@ class Editor {
     }
 
     if (this.mode === "pick") return this.onPickKey(str, key);
+
+    if (key.name === "paste") {
+      this.lastEsc = 0;
+      try {
+        this.opts.attachClipboardImage?.();
+      } catch (err) {
+        this.drawHint(dim((err as Error).message || "Failed to attach clipboard image."));
+        return;
+      }
+      this.refreshMenu();
+      return this.draw();
+    }
 
     // A bracketed paste delivers its body as plain `str` with the pasting flag
     // set on the KeySource; newlines in it must be inserted as text, not submit.
@@ -307,6 +322,10 @@ class Editor {
     // Printable input.
     if (str && !key.ctrl && !key.meta) {
       this.lastEsc = 0;
+      if (str.length > 1 && this.opts.attachDroppedImages?.(str)) {
+        this.refreshMenu();
+        return this.draw();
+      }
       this.insertText(str);
       this.refreshMenu();
       return this.draw();
@@ -349,8 +368,8 @@ class Editor {
     return this.lines.join("\n");
   }
 
-  private attachmentGroups(): { skills: string[]; mcps: string[] } {
-    return this.opts.attachments?.() ?? { skills: [], mcps: [] };
+  private attachmentGroups(): { skills: string[]; mcps: string[]; images: string[] } {
+    return this.opts.attachments?.() ?? { skills: [], mcps: [], images: [] };
   }
 
   private clearAttachmentFocus(): void {
@@ -359,12 +378,17 @@ class Editor {
 
   private attachmentLabels(kind: AttachmentKind): string[] {
     const groups = this.attachmentGroups();
+    if (kind === "image") return groups.images;
     return kind === "skill" ? groups.skills : groups.mcps;
   }
 
   private tryEnterAttachmentFocus(): boolean {
     if (this.mode === "menu" || this.mode === "pick" || this.mode === "secret") return false;
-    const { skills, mcps } = this.attachmentGroups();
+    const { skills, mcps, images } = this.attachmentGroups();
+    if (images.length > 0) {
+      this.attachmentFocus = { kind: "image", index: images.length - 1 };
+      return true;
+    }
     if (skills.length > 0) {
       this.attachmentFocus = { kind: "skill", index: skills.length - 1 };
       return true;
@@ -389,8 +413,16 @@ class Editor {
 
   private moveAttachmentFocusVertical(dir: -1 | 1): boolean {
     if (!this.attachmentFocus) return false;
-    const { skills, mcps } = this.attachmentGroups();
+    const { skills, mcps, images } = this.attachmentGroups();
     if (dir < 0) {
+      if (this.attachmentFocus.kind === "image") {
+        this.clearAttachmentFocus();
+        return false;
+      }
+      if (this.attachmentFocus.kind === "skill" && images.length > 0) {
+        this.attachmentFocus = { kind: "image", index: Math.min(this.attachmentFocus.index, images.length - 1) };
+        return true;
+      }
       if (this.attachmentFocus.kind === "skill" && mcps.length > 0) {
         this.attachmentFocus = { kind: "mcp", index: Math.min(this.attachmentFocus.index, mcps.length - 1) };
         return true;
@@ -400,6 +432,10 @@ class Editor {
     }
     if (this.attachmentFocus.kind === "mcp" && skills.length > 0) {
       this.attachmentFocus = { kind: "skill", index: Math.min(this.attachmentFocus.index, skills.length - 1) };
+      return true;
+    }
+    if (this.attachmentFocus.kind === "skill" && images.length > 0) {
+      this.attachmentFocus = { kind: "image", index: Math.min(this.attachmentFocus.index, images.length - 1) };
       return true;
     }
     this.clearAttachmentFocus();
@@ -420,17 +456,40 @@ class Editor {
       };
       return true;
     }
-    const otherKind: AttachmentKind = this.attachmentFocus.kind === "skill" ? "mcp" : "skill";
-    const otherLabels = this.attachmentLabels(otherKind);
-    this.attachmentFocus = otherLabels.length > 0
-      ? { kind: otherKind, index: Math.min(this.attachmentFocus.index, otherLabels.length - 1) }
-      : null;
+    for (const otherKind of this.attachmentFallbackOrder(this.attachmentFocus.kind)) {
+      const otherLabels = this.attachmentLabels(otherKind);
+      if (otherLabels.length > 0) {
+        this.attachmentFocus = {
+          kind: otherKind,
+          index: Math.min(this.attachmentFocus.index, otherLabels.length - 1),
+        };
+        return true;
+      }
+    }
+    this.attachmentFocus = null;
     return true;
+  }
+
+  private attachmentFallbackOrder(kind: AttachmentKind): AttachmentKind[] {
+    switch (kind) {
+      case "image":
+        return ["skill", "mcp"];
+      case "skill":
+        return ["mcp", "image"];
+      case "mcp":
+      default:
+        return ["skill", "image"];
+    }
   }
 
   private renderFocusedBadgeRows(badges: string[]): string[] {
     if (!this.attachmentFocus) return badges;
-    const targetPrefix = this.attachmentFocus.kind === "skill" ? "skills: " : "mcp: ";
+    const targetPrefix =
+      this.attachmentFocus.kind === "skill"
+        ? "skills: "
+        : this.attachmentFocus.kind === "mcp"
+          ? "mcp: "
+          : "images: ";
     return badges.map((badge) => {
       if (!badge.startsWith(targetPrefix)) return badge;
       const labels = this.attachmentLabels(this.attachmentFocus!.kind);
@@ -649,7 +708,6 @@ class Editor {
         stdout.write("\x1b[2J\x1b[H");
         this.lastRenderedRows = [];
         this.lastView = null;
-        this.captureRegionAnchor();
         break;
       case "d": // EOF on empty buffer is handled by the façade; ignore here
         return;
@@ -872,15 +930,11 @@ class Editor {
     });
   }
 
-  private captureRegionAnchor(): void {
-    if (!this.opts.keys.isTTY) return;
-    stdout.write("\x1b7");
-  }
-
   private restoreRegionAnchor(): void {
     if (!this.opts.keys.isTTY) return;
-    stdout.write("\x1b8");
     stdout.write("\r");
+    const rowsUp = this.lastView?.cursorRowInRegion ?? 0;
+    if (rowsUp > 0) stdout.write(`\x1b[${rowsUp}A`);
   }
 
   private paintView(view: RenderView): void {

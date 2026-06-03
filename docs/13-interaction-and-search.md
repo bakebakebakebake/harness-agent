@@ -108,7 +108,42 @@ repo 级控制文件:
 
 当前重点还是“文件级浏览 + patch drill-down”,还没有做 side-by-side。
 
-## 4. `/search`
+## 4. 图片附件
+
+当前图片输入已经挂进同一条输入链路了。
+
+最常见的几种方式:
+
+```text
+/image
+/image add ./docs/diagram.png
+/image paste
+```
+
+- `/image add <path>`
+  - 把本地图片挂到下一条消息
+- `/image paste`
+  - 从 macOS 剪贴板导入图片
+  - 截图到剪贴板后,也走这条路径
+- Finder 拖拽图片到输入框时:
+  - 如果终端插入的是图片路径
+  - Light-Agent 会直接把它识别成图片附件
+  - 不再把这段路径留在正文里
+
+挂载后输入框会显示:
+
+```text
+images: a.png, b.png
+```
+
+图片和 skill / MCP 一样:
+
+- 只作用于下一条消息
+- 发出去后自动清空
+- 空输入时 `Backspace` 可逐个回删
+- 有正文时可先按 `↑` 进入附件区,再高亮删除
+
+## 5. `/search`
 
 ```text
 /search light-agent github
@@ -162,12 +197,40 @@ repo 级控制文件:
 - “latest / today / recent” 这类 query 会更偏向新结果
 - 输出默认保留来源和 backend,方便人工判断可信度
 
+如果你在切换模型后怀疑“模型名能选上,但实际不可用”,现在可以直接跑:
+
+```text
+/model test
+/model test gpt-5-mini
+```
+
+它会检查两件事:
+
+1. 当前 baseURL 的模型目录接口是不是正常返回 API JSON
+2. 当前模型能不能实际完成一次最小回复
+
+这对排查“代理站返回网页 HTML,但 CLI 误以为请求成功”这类问题很有用。
+
+现在在 onboarding 和 `/profile new` 里,只要你先填好了 provider、API key 和 baseURL, CLI 就会立刻尝试抓取对应模型目录:
+
+- TTY 下优先走 picker 选择
+- 仍然保留 `Enter custom model`
+- 非 TTY 或抓取失败时,继续回退到手工输入
+
+对于 OpenAI 兼容网关,现在还有一层自动恢复:
+
+- 如果你填的是站点根地址,例如 `https://example.com`
+- `/models` 或 `/chat/completions` 返回的是网站 HTML
+- Light-Agent 会自动重试标准的 `/v1/models` 和 `/v1/chat/completions`
+
+所以像某些代理站“官网地址可打开,真正 API 在 `/v1` 下”这种情况,现在不需要你先手工改配置才能测出来。`/model test` 也会把实际命中的 catalog URL 打出来,方便确认恢复是否生效。
+
 模型工具层也同步有:
 
 - `web_search`
 - `web_fetch`
 
-## 5. `/mcp` 与 `/protect`
+## 6. `/mcp` 与 `/protect`
 
 `/mcp` 现在会显示:
 
@@ -205,7 +268,32 @@ repo 级控制文件:
 `npm run dev` 这类长期运行命令更不容易再出现 `suspended (tty input)`
 或 `suspended (tty output)`。
 
-## 6. `/debug` 与日志
+## 7. `/schedule` 与 `/gui`
+
+这两块是新增能力:
+
+```text
+/schedule
+/schedule add
+/schedule status
+/gui
+/gui doctor
+```
+
+- `/schedule`
+  - 管理本机后台任务
+  - 第一版支持 `once`、`daily`、`weekly`
+  - 状态、pid、log 都落在 `~/.light-agent/scheduler/`
+- `/gui`
+  - 列出当前已接通的 macOS GUI action
+  - `doctor` 会检查 `osascript` / `System Events` 权限状态
+
+如果只是想先了解怎么用,更详细的说明在:
+
+- `docs/14-multimodal-and-image-input.md`
+- `docs/15-scheduler-and-gui-automation.md`
+
+## 8. `/debug` 与日志
 
 ```text
 /debug on
@@ -226,7 +314,7 @@ repo 级控制文件:
   - `/search` 结果和抓取 URL
   - 顶层异常与未处理错误
 
-## 7. CI
+## 9. CI
 
 仓库已接入 GitHub Actions:
 
@@ -243,12 +331,16 @@ npm test
 npm run build
 ```
 
-## 8. 当前实现结构
+## 10. 当前实现结构
 
 - `src/commands/registry.ts`
   - 负责 slash 菜单召回、排序、dispatch
 - `src/commands/interactionCommands.ts`
-  - 负责 `/diff`、`/search`、`/skill`、`/debug`
+  - 负责 `/diff`、`/search`、`/skill`、`/image`、`/debug`
+- `src/commands/scheduleCommands.ts`
+  - 负责 `/schedule`
+- `src/commands/guiCommands.ts`
+  - 负责 `/gui`
 - `src/ui/lineEditor.ts`
   - 负责编辑器状态机、history、rewind、interrupt、菜单开关
 - `src/ui/editorRender.ts`
@@ -257,5 +349,11 @@ npm run build
   - 直接解析 raw stdin,这样单独 `Esc` 可以立刻生效
 - `src/util/web.ts`
   - 负责 Tavily/Bing 搜索后端、重排和页面抓取
+- `src/util/images.ts`
+  - 负责图片校验、拖拽路径识别、剪贴板桥接、visionMode 本地拦截
+- `src/scheduler/`
+  - 负责 jobs.json、runner、run log、后台执行
+- `src/gui/macos.ts`
+  - 负责 Finder / Notes / Safari / System Events 的脚本白名单桥接
 - `src/ext/repoConfig.ts`
   - 负责 repo 级 `disabledSkills`、`blockedCommands`、`protectedPaths`

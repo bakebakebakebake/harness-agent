@@ -9,6 +9,7 @@ import {
 import {
   selectModel,
   type Ask as ModelAsk,
+  type Pick as ModelPick,
 } from "./model/selection.js";
 import { fetchModels as defaultFetchModels, type FetchModels } from "./model/models.js";
 
@@ -48,6 +49,7 @@ export interface OnboardingResult {
 export async function collectOnboarding(
   ask: Ask,
   fetch: FetchModels = defaultFetchModels,
+  pick?: ModelPick,
 ): Promise<OnboardingResult> {
   const choice = (
     await ask(
@@ -59,14 +61,15 @@ export async function collectOnboarding(
   ).trim();
 
   if (choice === "2") {
-    return collectOpenAI(ask, fetch);
+    return collectOpenAI(ask, fetch, pick);
   }
-  return collectAnthropic(ask, fetch);
+  return collectAnthropic(ask, fetch, pick);
 }
 
 async function collectAnthropic(
   ask: Ask,
   fetch: FetchModels,
+  pick?: ModelPick,
 ): Promise<OnboardingResult> {
   const apiKey = (
     await ask("Anthropic API key (sk-ant-…): ", { secret: true })
@@ -79,6 +82,7 @@ async function collectAnthropic(
   const model = (
     await selectModel({
       ask,
+      ...(pick ? { pick } : {}),
       fetch,
       provider: "anthropic",
       apiKey,
@@ -103,6 +107,7 @@ async function collectAnthropic(
 async function collectOpenAI(
   ask: Ask,
   fetch: FetchModels,
+  pick?: ModelPick,
 ): Promise<OnboardingResult> {
   const apiKey = (await ask("API key: ", { secret: true })).trim();
   const baseURL = (
@@ -113,6 +118,7 @@ async function collectOpenAI(
   const model = (
     await selectModel({
       ask,
+      ...(pick ? { pick } : {}),
       fetch,
       provider: "openai",
       apiKey,

@@ -37,11 +37,18 @@ function renderUserMessage(m: Message, write: (line: string) => void): void {
     .map((b) => b.text)
     .join("")
     .trim();
-  if (!text) return; // a pure tool_result message — nothing to echo
-  const lines = text.split("\n");
+  const images = m.content.filter(
+    (b): b is Extract<typeof b, { type: "image" }> => b.type === "image",
+  );
+  if (!text && images.length === 0) return; // a pure tool_result message — nothing to echo
+  const lines = text ? text.split("\n") : [""];
   write(bgDark(`${bold(cyan("You"))} ${dim(symbols.dot)} ${lines[0] ?? ""}`));
   for (const line of lines.slice(1)) {
     write(bgDark(`      ${line}`));
+  }
+  for (const image of images) {
+    const label = image.path.split(/[\\/]/).pop() ?? image.path;
+    write(bgDark(`      [image] ${label} ${dim(`(${image.source})`)}`));
   }
   write("");
 }

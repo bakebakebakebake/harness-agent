@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { readImageAsBase64 } from "../util/images.js";
 import type {
   ContentBlock,
   Message,
@@ -171,7 +172,8 @@ function thinkingBudget(depth: ModelRequest["thinking"]): number {
 }
 
 /** Map our Message[] to the Anthropic SDK's MessageParam[]. */
-function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {  return messages.map((m) => ({
+function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
+  return messages.map((m) => ({
     role: m.role,
     content: m.content.map(toAnthropicBlock),
   }));
@@ -181,11 +183,21 @@ function toAnthropicBlock(
   block: ContentBlock,
 ):
   | Anthropic.TextBlockParam
+  | Anthropic.ImageBlockParam
   | Anthropic.ToolUseBlockParam
   | Anthropic.ToolResultBlockParam {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
+    case "image":
+      return {
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: block.mimeType,
+          data: readImageAsBase64(block.path),
+        },
+      };
     case "tool_use":
       return {
         type: "tool_use",

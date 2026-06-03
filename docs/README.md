@@ -57,6 +57,8 @@
 | 文档 | 主题 | 一句话 |
 |---|---|---|
 | [13 · 当前交互与搜索工作流](13-interaction-and-search.md) | 当前 CLI 行为 | `/` 菜单排序、`/skill`、`/diff`、`/search`、`/debug` 的实际使用方式 |
+| [14 · 多模态与图片输入](14-multimodal-and-image-input.md) | 图片输入 | `/image`、拖拽路径、剪贴板桥接、visionMode 与输入框 badge |
+| [15 · Scheduler 与 macOS GUI 自动化](15-scheduler-and-gui-automation.md) | 后台任务 / GUI | `/schedule`、后台 runner、`/gui` 与 `macos_gui` 工具 |
 
 ## 五条最值得记住的总原则
 

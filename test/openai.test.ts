@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fetchModels } from "../src/model/models.js";
 import {
   StreamState,
   toOpenAIMessages,
@@ -7,6 +11,7 @@ import {
   sseLines,
 } from "../src/model/openai.js";
 import type { Message, ModelEvent, ToolSpec } from "../src/model/types.js";
+import { OpenAIProvider } from "../src/model/openai.js";
 
 describe("toOpenAIMessages", () => {
   it("prepends system and passes through plain user text", () => {
@@ -57,6 +62,28 @@ describe("toOpenAIMessages", () => {
       tool_call_id: "c1",
       content: "file body",
     });
+  });
+
+  it("encodes user image blocks as image_url content parts", () => {
+    const dir = mkdtempSync(join(tmpdir(), "light-agent-openai-"));
+    const path = join(dir, "sample.png");
+    writeFileSync(path, Buffer.from("png"));
+    const msgs: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look at this" },
+          { type: "image", path, mimeType: "image/png", source: "file" },
+        ],
+      },
+    ];
+    const out = toOpenAIMessages("", msgs);
+    const user = out[0] as Extract<ReturnType<typeof toOpenAIMessages>[number], { role: "user" }>;
+    expect(Array.isArray(user.content)).toBe(true);
+    expect(user.content).toMatchObject([
+      { type: "text", text: "look at this" },
+      { type: "image_url", image_url: { url: expect.stringContaining("data:image/png;base64,") } },
+    ]);
   });
 
   it("uses a single space for an assistant turn that is only tool calls", () => {
@@ -227,5 +254,130 @@ describe("sseLines", () => {
     const out: string[] = [];
     for await (const line of sseLines(stream)) out.push(line);
     expect(out).toEqual(['{"a":1}', '{"b":2}', "[DONE]"]);
+  });
+});
+
+describe("OpenAIProvider streaming validation", () => {
+  it("fails clearly when an endpoint returns HTML instead of SSE", async () => {
+    const realFetch = global.fetch;
+    global.fetch = (async () =>
+      new Response("<!doctype html><html><body>no api</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      })) as typeof fetch;
+    try {
+      const provider = new OpenAIProvider({
+        apiKey: "test",
+        model: "gpt-5-mini",
+        baseURL: "https://example.com/v1",
+      });
+      const events: ModelEvent[] = [];
+      for await (const ev of provider.stream({
+        system: "",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        tools: [],
+      })) {
+        events.push(ev);
+      }
+      const err = events.find((ev) => ev.type === "error");
+      expect(err && err.type === "error" ? err.error.message : "").toContain("returned HTML");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  it("retries with /v1 when the base URL points at a website root", async () => {
+    const realFetch = global.fetch;
+    const calls: string[] = [];
+    global.fetch = (async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (calls.length === 1) {
+        return new Response("<!doctype html><html><body>home</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const enc = new TextEncoder();
+          controller.enqueue(
+            enc.encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n'),
+          );
+          controller.enqueue(
+            enc.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n'),
+          );
+          controller.enqueue(enc.encode("data: [DONE]\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    try {
+      const provider = new OpenAIProvider({
+        apiKey: "test",
+        model: "gpt-5-mini",
+        baseURL: "https://example.com",
+      });
+      const events: ModelEvent[] = [];
+      for await (const ev of provider.stream({
+        system: "",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        tools: [],
+      })) {
+        events.push(ev);
+      }
+      const text = events
+        .filter((ev): ev is Extract<ModelEvent, { type: "text_delta" }> => ev.type === "text_delta")
+        .map((ev) => ev.text)
+        .join("");
+      expect(text).toBe("OK");
+      expect(calls).toEqual([
+        "https://example.com/chat/completions",
+        "https://example.com/v1/chat/completions",
+      ]);
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});
+
+describe("fetchModels", () => {
+  it("retries model discovery with /v1 when an OpenAI base URL returns website HTML", async () => {
+    const realFetch = global.fetch;
+    const calls: string[] = [];
+    global.fetch = (async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (calls.length === 1) {
+        return new Response("<!doctype html><html><body>home</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return new Response(JSON.stringify({ data: [{ id: "gpt-5.4-mini" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const result = await fetchModels({
+        provider: "openai",
+        apiKey: "test",
+        baseURL: "https://example.com",
+      });
+      expect(result.models).toEqual(["gpt-5.4-mini"]);
+      expect(result.error).toBeUndefined();
+      expect(result.resolvedURL).toBe("https://example.com/v1/models");
+      expect(calls).toEqual([
+        "https://example.com/models",
+        "https://example.com/v1/models",
+      ]);
+    } finally {
+      global.fetch = realFetch;
+    }
   });
 });

@@ -100,6 +100,7 @@ export class KeySource {
   private started = false;
   private restoreOnExit: (() => void) | null = null;
   private pending = "";
+  private pasteHadContent = false;
   pasting = false;
 
   get isTTY(): boolean {
@@ -177,11 +178,16 @@ export class KeySource {
       if (this.pending.startsWith(PASTE_START)) {
         this.pending = this.pending.slice(PASTE_START.length);
         this.pasting = true;
+        this.pasteHadContent = false;
         continue;
       }
       if (this.pending.startsWith(PASTE_END)) {
         this.pending = this.pending.slice(PASTE_END.length);
+        if (!this.pasteHadContent) {
+          emitNamed(this.handler, "paste", PASTE_START + PASTE_END);
+        }
         this.pasting = false;
+        this.pasteHadContent = false;
         continue;
       }
 
@@ -222,6 +228,7 @@ export class KeySource {
       if (first === undefined) break;
       const ch = String.fromCodePoint(first);
       this.pending = this.pending.slice(ch.length);
+      if (this.pasting) this.pasteHadContent = true;
 
       if (ch === "\r" || ch === "\n") {
         emitNamed(this.handler, "return", ch);

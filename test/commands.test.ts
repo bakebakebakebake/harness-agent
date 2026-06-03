@@ -20,6 +20,7 @@ import { upsertMemoryCard, readMemoryCardFromDb } from "../src/memory/store.js";
 import { appendTranscriptTurn } from "../src/memory/transcript.js";
 import { newSession, saveSession } from "../src/sessions.js";
 import type { MemoryCard } from "../src/memory/types.js";
+import { loadSchedulerStore } from "../src/scheduler/store.js";
 
 const SAVED = { ...process.env };
 const realFetch = global.fetch;
@@ -245,6 +246,30 @@ describe("dispatch parsing", () => {
     expect(out).toContain("last call");
   });
 
+  it("surfaces smoke-test failures for the current model", async () => {
+    isolated();
+    global.fetch = (async () =>
+      new Response("<!doctype html><html><body>no api</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      })) as typeof fetch;
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config = {
+      ...state.config,
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-5.4-mini",
+      baseURL: "https://example.com",
+    };
+    await reg.dispatch("/model test", ctx);
+    const out = output();
+    expect(out).toContain("Testing model");
+    expect(out).toContain("catalog");
+    expect(out).toContain("stream");
+    expect(out).toContain("website page");
+  });
+
   it("shows memory stats and list output", async () => {
     isolated();
     const root = mkdtempSync(join(tmpdir(), "memory-cmd-"));
@@ -259,6 +284,41 @@ describe("dispatch parsing", () => {
     expect(out).toContain("Memory cards");
     expect(out).toContain("Run typecheck before tests");
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("attaches and clears image attachments", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "image-cmd-"));
+    const imagePath = join(root, "diagram.png");
+    writeFileSync(imagePath, Buffer.from("png"));
+    const reg = buildRegistry();
+    const { ctx, state } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch(`/image add ${imagePath}`, ctx);
+    expect(state.pendingAttachments).toHaveLength(1);
+    expect(state.pendingAttachments[0]?.kind).toBe("image");
+    await reg.dispatch("/image clear", ctx);
+    expect(state.pendingAttachments).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("creates a scheduled job through /schedule add", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const root = mkdtempSync(join(tmpdir(), "schedule-cmd-"));
+    const { ctx, state } = makeCtx([
+      "Daily recap",
+      "Summarize repository activity",
+      "daily",
+      "09:30",
+    ]);
+    state.config.workdir = root;
+    await reg.dispatch("/schedule add", ctx);
+    const store = loadSchedulerStore();
+    expect(store.jobs).toHaveLength(1);
+    expect(store.jobs[0]?.name).toBe("Daily recap");
+    expect(store.jobs[0]?.scheduleType).toBe("daily");
+    expect(store.jobs[0]?.scheduleSpec).toBe("09:30");
   });
 
   it("can drive memory actions from the picker", async () => {

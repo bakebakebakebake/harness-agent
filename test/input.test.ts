@@ -57,10 +57,21 @@ describe("changedRowIndices", () => {
 describe("attachmentBadges", () => {
   it("formats queued mcp and skill attachments for the input frame", () => {
     expect(attachmentBadges([
+      {
+        kind: "image",
+        label: "diagram.png",
+        image: {
+          type: "image",
+          path: "/tmp/diagram.png",
+          mimeType: "image/png",
+          source: "file",
+        },
+      },
       { kind: "mcp", label: "docs", context: "# MCP: docs" },
       { kind: "skill", label: "review", context: "# Skill: review" },
       { kind: "skill", label: "docs", context: "# Skill: docs" },
     ])).toEqual([
+      "images: diagram.png",
       "mcp: docs",
       "skills: review, docs",
     ]);

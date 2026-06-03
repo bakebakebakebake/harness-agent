@@ -15,10 +15,16 @@ import { isDebugEnabled, logger, setDebugEnabled } from "../util/logger.js";
 import { fetchWebPage, searchWeb, type SearchBias } from "../util/web.js";
 import {
   clearPendingAttachmentsByKind,
+  imageAttachment,
   pushPendingAttachment,
   removePendingAttachment,
   skillAttachment,
 } from "../pendingContext.js";
+import {
+  importClipboardImage,
+  listImageFiles,
+  validateImagePath,
+} from "../util/images.js";
 
 function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -254,6 +260,143 @@ export const searchCommand: SlashCommand = {
     } catch (err) {
       ctx.out(red(`  Fetch failed: ${(err as Error).message}`));
     }
+    return {};
+  },
+};
+
+function imagePickerItems(cwd: string): Array<{
+  label: string;
+  value: string;
+  hint?: string;
+  selectable?: boolean;
+  tone?: "dim";
+}> {
+  const files = listImageFiles(cwd, 24);
+  return [
+    { label: "Actions", value: "__actions__", selectable: false, tone: "dim" },
+    { label: "Paste from clipboard", value: "paste", hint: "Import the current macOS clipboard image" },
+    { label: "List attached images", value: "list", hint: "Inspect what is queued for the next message" },
+    { label: "Remove one attached image", value: "remove", hint: "Choose a queued image and detach it" },
+    { label: "Clear attached images", value: "clear", hint: "Drop every queued image at once" },
+    ...(files.length > 0
+      ? [
+          { label: "Project images", value: "__project__", selectable: false, tone: "dim" as const },
+          ...files.map((path) => ({
+            label: path.replace(`${cwd}/`, ""),
+            value: `add:${path}`,
+            hint: path,
+          })),
+        ]
+      : []),
+  ];
+}
+
+function attachedImageItems(ctx: CommandContext): Array<{ label: string; value: string; hint?: string }> {
+  return ctx.state.pendingAttachments
+    .filter((item) => item.kind === "image")
+    .map((item) => ({
+      label: item.label,
+      value: item.label,
+      hint: item.image ? `${item.image.mimeType} ${symbols.dot} ${item.image.source}` : "image",
+    }));
+}
+
+function queueImagePath(ctx: CommandContext, rawPath: string, source: "file" | "drop" | "clipboard" = "file"): string {
+  const image = validateImagePath(rawPath, {
+    cwd: ctx.state.config.workdir,
+    source,
+  });
+  pushPendingAttachment(ctx.state, imageAttachment(image));
+  ctx.state.seedInput ??= "";
+  return image.path;
+}
+
+export const imageCommand: SlashCommand = {
+  name: "image",
+  description: "Attach local or clipboard images to the next message",
+  keywords: ["vision", "multimodal", "clipboard", "paste", "photo", "screenshot"],
+  priority: 102,
+  subcommands: ["add", "paste", "remove", "detach", "rm", "clear", "list"],
+  async run(ctx, args) {
+    const sub = (args[0] ?? "").trim().toLowerCase();
+    if (sub === "clear") {
+      clearPendingAttachmentsByKind(ctx.state, "image");
+      ctx.out(green("  Cleared attached images."));
+      return {};
+    }
+    if (sub === "list") {
+      const attached = ctx.state.pendingAttachments.filter((item) => item.kind === "image");
+      if (attached.length === 0) {
+        ctx.out(dim("  No images are attached to the next message."));
+        return {};
+      }
+      ctx.out(bold("  Attached images"));
+      for (const item of attached) {
+        const detail = item.image ? `${item.image.mimeType} ${symbols.dot} ${item.image.source}` : "image";
+        ctx.out(`  ${cyan(item.label)} ${dim(detail)}`);
+      }
+      return {};
+    }
+    if (sub === "remove" || sub === "detach" || sub === "rm") {
+      const name = args.slice(1).join(" ").trim();
+      if (!name) {
+        ctx.out(dim(`  Usage: /image ${sub} <name>`));
+        return {};
+      }
+      if (!removePendingAttachment(ctx.state, "image", name)) {
+        ctx.out(dim(`  Image "${name}" is not currently attached.`));
+        return {};
+      }
+      ctx.out(green(`  Removed image "${name}" from the next message.`));
+      return {};
+    }
+    if (sub === "paste") {
+      const image = importClipboardImage();
+      pushPendingAttachment(ctx.state, imageAttachment(image));
+      ctx.state.seedInput ??= "";
+      return {};
+    }
+    if (sub === "add") {
+      const rawPath = args.slice(1).join(" ").trim();
+      if (!rawPath) {
+        ctx.out(dim("  Usage: /image add <path>"));
+        return {};
+      }
+      queueImagePath(ctx, rawPath, "file");
+      return {};
+    }
+    if (!sub && ctx.pick) {
+      const picked = await ctx.pick("  Attach an image", imagePickerItems(ctx.state.config.workdir));
+      if (!picked) return {};
+      if (picked === "paste") {
+        const image = importClipboardImage();
+        pushPendingAttachment(ctx.state, imageAttachment(image));
+        ctx.state.seedInput ??= "";
+        return {};
+      }
+      if (picked.startsWith("add:")) {
+        queueImagePath(ctx, picked.slice("add:".length), "file");
+        return {};
+      }
+      if (picked === "list") return imageCommand.run(ctx, ["list"]);
+      if (picked === "clear") return imageCommand.run(ctx, ["clear"]);
+      if (picked === "remove" && ctx.pick) {
+        const target = await ctx.pick("  Remove which image?", attachedImageItems(ctx));
+        if (!target) return {};
+        return imageCommand.run(ctx, ["remove", target]);
+      }
+    }
+    if (!sub) {
+      const attached = attachedImageItems(ctx);
+      ctx.out(bold("  Image attachments"));
+      ctx.out(`  ${dim("attached")} ${attached.length > 0 ? attached.map((item) => item.label).join(", ") : dim("(none)")}`);
+      ctx.out(dim("  /image add <path>"));
+      ctx.out(dim("  /image paste"));
+      ctx.out(dim("  /image remove <name>"));
+      ctx.out(dim("  /image clear"));
+      return {};
+    }
+    ctx.out(dim("  Usage: /image [add|paste|remove|clear|list]"));
     return {};
   },
 };

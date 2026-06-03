@@ -40,6 +40,7 @@ export interface AgentLoopOptions {
   registry: ToolRegistry;
   system: string;
   userInput: string;
+  userContent?: ContentBlock[];
   maxTurns: number;
   workdir: string;
   signal?: AbortSignal;
@@ -80,7 +81,13 @@ export async function* runAgentLoop(
   // user input is appended here; the loop appends assistant + tool_result
   // messages as it goes.
   const messages: Message[] = opts.history ?? [];
-  messages.push({ role: "user", content: [{ type: "text", text: opts.userInput }] });
+  messages.push({
+    role: "user",
+    content:
+      opts.userContent && opts.userContent.length > 0
+        ? opts.userContent
+        : [{ type: "text", text: opts.userInput }],
+  });
 
   let turn = 0;
   while (true) {
