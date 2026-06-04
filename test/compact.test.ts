@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { compactHistory } from "../src/loop/compact.js";
+import {
+  AUTO_COMPACT_SOFT_THRESHOLD,
+  AUTO_COMPACT_STRONG_THRESHOLD,
+  compactHistory,
+  compactModeForUsage,
+} from "../src/loop/compact.js";
 import type {
   Message,
   ModelEvent,
@@ -16,6 +21,20 @@ class SummaryProvider implements ModelProvider {
   async *stream(req: ModelRequest): AsyncIterable<ModelEvent> {
     this.lastRequest = req;
     yield { type: "text_delta", text: this.summary };
+    yield {
+      type: "message_stop",
+      stopReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  }
+}
+
+class QueueSummaryProvider implements ModelProvider {
+  readonly name = "summary";
+  readonly model = "summary-queue";
+  constructor(private readonly summaries: string[]) {}
+  async *stream(): AsyncIterable<ModelEvent> {
+    yield { type: "text_delta", text: this.summaries.shift() ?? "" };
     yield {
       type: "message_stop",
       stopReason: "end_turn",
@@ -132,5 +151,67 @@ describe("compactHistory", () => {
     const provider = new SummaryProvider("S");
     await compactHistory(provider, history, { keepRecent: 1 });
     expect(provider.lastRequest?.tools).toEqual([]);
+  });
+
+  it("folds older working summaries into an archival layer on repeated compaction", async () => {
+    const first = await compactHistory(
+      new QueueSummaryProvider(["WORKING 1"]),
+      [
+        ...exchange(1),
+        ...exchange(2),
+        ...exchange(3),
+        ...exchange(4),
+        ...exchange(5),
+        ...exchange(6),
+      ],
+      { keepRecent: 2 },
+    );
+
+    const second = await compactHistory(
+      new QueueSummaryProvider(["ARCHIVAL 1", "WORKING 2"]),
+      [...first.messages, ...exchange(7), ...exchange(8)],
+      { keepRecent: 2 },
+    );
+
+    expect(second.messages[0]?.role).toBe("assistant");
+    expect(second.messages[1]?.role).toBe("assistant");
+    const firstText = second.messages[0]?.content[0];
+    const secondText = second.messages[1]?.content[0];
+    expect(firstText && "text" in firstText ? firstText.text : "").toContain(
+      "[Summary layer=archival]",
+    );
+    expect(secondText && "text" in secondText ? secondText.text : "").toContain(
+      "[Summary layer=working]",
+    );
+  });
+});
+
+describe("compactModeForUsage", () => {
+  it("returns soft, strong, and emergency modes at the expected thresholds", () => {
+    expect(
+      compactModeForUsage({
+        usedTokens: AUTO_COMPACT_SOFT_THRESHOLD * 1000 - 1,
+        totalTokens: 1000,
+      }),
+    ).toBeNull();
+    expect(
+      compactModeForUsage({
+        usedTokens: AUTO_COMPACT_SOFT_THRESHOLD * 1000,
+        totalTokens: 1000,
+      }),
+    ).toBe("soft");
+    expect(
+      compactModeForUsage({
+        usedTokens: AUTO_COMPACT_STRONG_THRESHOLD * 1000,
+        totalTokens: 1000,
+      }),
+    ).toBe("strong");
+    expect(
+      compactModeForUsage({
+        usedTokens: 10,
+        totalTokens: 1000,
+        contextOverflow: true,
+      }),
+    ).toBe("emergency");
   });
 });

@@ -1,7 +1,7 @@
 # AGENT.md — Light-Agent 项目交接文档
 
 > 本文件用于**跨会话交接**:把项目背景、架构、进度、规划与开发约定集中记录,
-> 确保换会话后不丢失上下文。最后更新:2026-06-03。
+> 确保换会话后不丢失上下文。最后更新:2026-06-04。
 
 ---
 
@@ -17,7 +17,7 @@
 - **语言**:TypeScript(ESM,`"type": "module"`),Node ≥ 20。
 
 ### 当前健康状态(交接时)
-- ✅ **423 个测试全部通过**,跨 **47 个测试文件**(`npm test`)。
+- ✅ **438 个测试全部通过**,跨 **50 个测试文件**(`npm test`)。
 - ✅ **`tsc --noEmit` 类型检查干净**(`npm run typecheck`)。
 - ✅ **npm 包可发布为** `light-agent-cli`,命令名为 `light-agent`。
 - ✅ **GitHub Actions CI 已接入**:`.github/workflows/ci.yml` 会在 push / PR / tag 上跑
@@ -205,10 +205,23 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、images
   当前 CLI 的 `high` 会映射到 DeepSeek 的最高档 `max`,并在不兼容网关上自动回退。
 - `/mcp` 会显示 configured / connected / loaded-tool 状态。
 - `/schedule` 已支持 `once` / `daily` / `weekly` 三种本机后台任务。
+- scheduler 现在有独立权限策略:
+  - `low` 风险工具默认允许
+  - `medium/high` 需要命中 repo 配置里的 `scheduler.allowedTools`
+  - `bash` / `shell` 还需要命中 `scheduler.allowedCommandPatterns`
+  - `pollIntervalSeconds`、`logRotationBytes`、`logRotationFiles` 也走同一份 repo 配置
 - `/gui` 提供 macOS GUI 自动化能力清单与 doctor;模型侧通过 `macos_gui` 工具触发。
 - `/protect` 可维护 repo 级 blocked commands 与 protected paths,只拦模型动作。
 - 流式渲染 + markdown + 工具调用行 + spinner;确认流带 diff 预览。
 - `lineEditor.ts` 已承载 picker、rewind、interrupt、seed 回填等输入态切换。
+- TUI resize 现在开始走**source-backed replay**:
+  - 输入区 resize 时会先重放 transcript/status,再重画当前输入框
+  - streaming resize 时会先重放已落盘 transcript,再重放当前 turn 的 live block
+  - markdown table 会按新的终端宽度重新渲染,而不是继续沿用旧行宽
+- resize 职责边界固定:
+  - 输入态只由 `lineEditor` 接管
+  - streaming 态只由 `Renderer` 接管
+  - `cli.ts` 只负责提供 source-backed prelude 和模式切换
 
 ### 权限模式
 `default`(按风险分级)/ `plan`(只读)/ `acceptEdits`(自动批准编辑)/
@@ -218,6 +231,8 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、images
 - `lineEditor.ts` — raw-mode 行编辑器状态机(按键处理、buffer、history、菜单开关、submit/cancel)。
 - `editorRender.ts` — 输入框视图拼装与 redraw 判断(`buildRenderView`、`buildHintView`、
   `shouldFullRedraw`、`wrapTextRows`)。
+- `render.ts` — 流式 turn 渲染,并维护 streaming resize replay。
+- `transcript.ts` — transcript 重放与 resume/rewind/resize 时的源数据回放。
   **输入框渲染现在已经从状态机里拆出一层,后续继续修 TUI 时优先先看 `editorRender.ts`,
   再决定是否需要动 `lineEditor.ts`。**
 - `keys.ts` — 唯一的 stdin 消费者(直接解析 raw stdin + 括号粘贴),确保单独 `Esc`
@@ -283,6 +298,10 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、images
   `~/.light-agent/logs/light-agent.log`。
 - **错误兜底可回归**:`src/util/errors.ts` 承担 CLI 错误分类,已有单测覆盖配置错误、
   临时网络错误、外部工具错误和未知内部错误四类。
+- **长会话压缩升级**:`/compact` 和自动 compact 已统一到三层结构:
+  `verbatim tail` + `working summary` + `archival summary`。自动触发阈值约为
+  `70%`(soft) / `85%`(strong),provider 报 `context overflow` 时会走
+  `emergency` 压缩,并把当前问题回填到输入框。
 
 ### 各特性实现要点(给接手者)
 - **#5 shell 引擎**:`util/shell.ts` 抽出两个函数——`runProcess`(argv + `shell:false`,

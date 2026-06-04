@@ -15,6 +15,7 @@ export interface ScheduledJob {
   updatedAt: string;
   lastRunAt?: string;
   lastRunStatus?: "idle" | "success" | "error" | "running";
+  lastRunError?: string;
   nextRunAt?: string;
 }
 

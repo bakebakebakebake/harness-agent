@@ -36,10 +36,20 @@ interface RenderState {
   fenceLang: string;
   /** Buffered table lines (raw), collected until the table ends. */
   table: string[];
+  /** Whether the previous rendered block was a blockquote. */
+  afterQuote: boolean;
+  /** Whether a buffered table should be separated from a preceding blockquote. */
+  tableNeedsLeadingBreak: boolean;
 }
 
 function newState(): RenderState {
-  return { inFence: false, fenceLang: "", table: [] };
+  return {
+    inFence: false,
+    fenceLang: "",
+    table: [],
+    afterQuote: false,
+    tableNeedsLeadingBreak: false,
+  };
 }
 
 export class MarkdownStream {
@@ -86,6 +96,8 @@ export class MarkdownStream {
  * line was buffered (inside a forming table).
  */
 function feedLine(line: string, st: RenderState): string {
+  const quote = /^\s*>\s?(.*)$/.exec(line);
+
   // Code fences take priority: a ``` line toggles fence state.
   const fence = /^\s*```(.*)$/.exec(line);
   if (fence) {
@@ -96,20 +108,31 @@ function feedLine(line: string, st: RenderState): string {
     }
     // Opening fence: flush any forming table first, then start the block.
     const pre = flushTable(st);
+    const prefix = st.afterQuote ? "\n" : "";
+    st.afterQuote = false;
     st.inFence = true;
     st.fenceLang = (fence[1] ?? "").trim().toLowerCase();
     const label = st.fenceLang || "code";
     const head = dim(label);
-    return pre ? pre + "\n" + head : head;
+    return pre ? pre + "\n" + prefix + head : prefix + head;
   }
   if (st.inFence) {
     // Pure highlighted code, no prefix — copy yields exactly the source line.
     return highlight(line, st.fenceLang);
   }
 
+  if (quote) {
+    st.afterQuote = true;
+    return bold(gray("▌ ")) + italic(gray(renderInline(quote[1] ?? "")));
+  }
+
   // GFM tables: buffer |…| lines until the table ends.
   const isTableRow = /^\s*\|.*\|\s*$/.test(line);
   if (isTableRow) {
+    if (st.afterQuote && st.table.length === 0) {
+      st.tableNeedsLeadingBreak = true;
+      st.afterQuote = false;
+    }
     st.table.push(line);
     return ""; // buffered; rendered on the first non-table line / flush
   }
@@ -117,10 +140,17 @@ function feedLine(line: string, st: RenderState): string {
     // The table just ended on this (non-table) line. Render it, then the line.
     const rendered = flushTable(st);
     const after = renderBlockLine(line);
+    if (line.trim() === "") return rendered;
     return rendered + "\n" + after;
   }
 
-  return renderBlockLine(line);
+  const rendered = renderBlockLine(line);
+  if (line.trim() === "") return rendered;
+  if (st.afterQuote) {
+    st.afterQuote = false;
+    return "\n" + rendered;
+  }
+  return rendered;
 }
 
 /** Render and clear any buffered table; "" if there is none / it isn't valid. */
@@ -128,7 +158,12 @@ function flushTable(st: RenderState): string {
   if (st.table.length === 0) return "";
   const rows = st.table;
   st.table = [];
-  return renderTable(rows);
+  const rendered = renderTable(rows);
+  if (st.tableNeedsLeadingBreak) {
+    st.tableNeedsLeadingBreak = false;
+    return "\n" + rendered;
+  }
+  return rendered;
 }
 
 /** Classify and style one complete non-code, non-table line. */
@@ -142,12 +177,6 @@ function renderBlockLine(line: string): string {
   const heading = /^(#{1,6})\s+(.*)$/.exec(line);
   if (heading) {
     return bold(cyan(renderInline(heading[2] ?? "")));
-  }
-
-  // Blockquote: leading > (optionally repeated).
-  const quote = /^\s*>\s?(.*)$/.exec(line);
-  if (quote) {
-    return bold(gray("▌ ")) + italic(gray(renderInline(quote[1] ?? "")));
   }
 
   // Unordered list item: -, *, or + followed by a space.

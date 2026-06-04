@@ -126,7 +126,7 @@ const compactCommand: SlashCommand = {
     ctx.out(dim("  Compacting…"));
     let result;
     try {
-      result = await compactHistory(state.provider, state.history);
+      result = await compactHistory(state.provider, state.history, { mode: "soft" });
     } catch (err) {
       ctx.out(red(`  Compaction failed: ${(err as Error).message}`));
       return {};
@@ -145,7 +145,7 @@ const compactCommand: SlashCommand = {
     const total = contextWindowFor(state.config.model, state.config.contextWindow);
     ctx.out(
       dim(
-        `  Compacted ${result.collapsed} message(s) into a summary ` +
+        `  Compacted ${result.collapsed} message(s) into layered summaries ` +
           `(${formatContextPercent(usedBefore, total)} context before compaction).`,
       ),
     );

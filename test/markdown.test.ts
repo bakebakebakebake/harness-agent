@@ -18,6 +18,14 @@ describe("renderMarkdown block elements", () => {
     expect(renderMarkdown("> quoted")).toContain("quoted");
   });
 
+  it("leaves a blank line after a blockquote before the next paragraph", () => {
+    expect(renderMarkdown("> quoted\nnext")).toBe("▌ quoted\n\nnext");
+  });
+
+  it("does not add an extra blank line when the source already separates the blockquote", () => {
+    expect(renderMarkdown("> quoted\n\nnext")).toBe("▌ quoted\n\nnext");
+  });
+
   it("renders unordered list items with a bullet", () => {
     const out = renderMarkdown("- one\n* two\n+ three");
     expect(out).toContain("• one");

@@ -4,38 +4,43 @@ import type {
   ModelRequest,
 } from "../model/types.js";
 
-/**
- * Conversation compaction (#1, docs/03).
- *
- * As history grows it crowds the context window and slows/expensives every
- * request. Compaction replaces the OLDER prefix of the conversation with a
- * single model-written summary message, while keeping the most recent exchanges
- * verbatim so the immediate working context is untouched.
- *
- * Invariant we must never break: a `tool_use` block (in an assistant message)
- * must be followed by its `tool_result` (in the next user message), or the
- * provider rejects the next request. So we only ever cut at a "user turn
- * boundary" — a user message that carries real text (the start of a fresh
- * exchange) — never between an assistant tool call and its result.
- */
+export type CompactMode = "soft" | "strong" | "emergency";
+type SummaryLayer = "working" | "archival";
+
+const SUMMARY_PREFIX = "[Summary layer=";
+export const AUTO_COMPACT_SOFT_THRESHOLD = 0.7;
+export const AUTO_COMPACT_STRONG_THRESHOLD = 0.85;
+const DEFAULT_KEEP_RECENT: Record<CompactMode, number> = {
+  soft: 4,
+  strong: 3,
+  emergency: 2,
+};
 
 export interface CompactOptions {
-  /** How many recent user-turn exchanges to keep verbatim. Default 4. */
   keepRecent?: number;
-  /** Abort signal forwarded to the summarization call. */
   signal?: AbortSignal;
+  mode?: CompactMode;
 }
 
 export interface CompactResult {
-  /** The new, shorter history (summary message + kept tail). */
   messages: Message[];
-  /** The summary text the model produced (for display). */
   summary: string;
-  /** How many messages were collapsed into the summary. */
   collapsed: number;
 }
 
-/** Indices of user messages that carry text — the only safe split points. */
+export function compactModeForUsage(opts: {
+  usedTokens: number;
+  totalTokens: number;
+  contextOverflow?: boolean;
+}): CompactMode | null {
+  if (opts.contextOverflow) return "emergency";
+  if (opts.totalTokens <= 0) return null;
+  const frac = opts.usedTokens / opts.totalTokens;
+  if (frac >= AUTO_COMPACT_STRONG_THRESHOLD) return "strong";
+  if (frac >= AUTO_COMPACT_SOFT_THRESHOLD) return "soft";
+  return null;
+}
+
 function userTurnBoundaries(messages: Message[]): number[] {
   const out: number[] = [];
   for (let i = 0; i < messages.length; i++) {
@@ -49,7 +54,6 @@ function userTurnBoundaries(messages: Message[]): number[] {
   return out;
 }
 
-/** Flatten a message's blocks into plain text for the summarization prompt. */
 function messageToText(m: Message): string {
   const parts: string[] = [];
   for (const b of m.content) {
@@ -62,22 +66,33 @@ function messageToText(m: Message): string {
   return parts.join("\n");
 }
 
-const SUMMARY_INSTRUCTION =
-  "You are compacting a coding-assistant conversation to save context. " +
-  "Summarize the conversation below into a dense brief that a fresh assistant " +
-  "could read to continue seamlessly. Preserve: the user's goals and explicit " +
-  "instructions, key decisions and their rationale, files/functions touched, " +
-  "current state, and any unresolved TODOs. Drop pleasantries and redundant " +
-  "detail. Use terse bullet points. Do not invent facts.";
+function summaryInstruction(layer: SummaryLayer): string {
+  const brevity =
+    layer === "archival"
+      ? "Keep it short and highly compressed."
+      : "Keep enough detail to resume coding work accurately.";
+  return (
+    "You are compacting a coding-assistant conversation to save context. " +
+    "Summarize the material below into markdown with these exact sections:\n" +
+    "- User goals\n" +
+    "- Completed work\n" +
+    "- Current code state\n" +
+    "- Key files / commands / decisions\n" +
+    "- Open issues / next steps\n" +
+    "Use terse bullet points. Preserve explicit instructions, key decisions, " +
+    "files touched, and unresolved work. Prefer facts over prose. " +
+    `${brevity} Do not invent facts.`
+  );
+}
 
-/** Drain a provider stream into the concatenated assistant text it produced. */
 async function summarizeViaModel(
   provider: ModelProvider,
   conversationText: string,
+  layer: SummaryLayer,
   signal?: AbortSignal,
 ): Promise<string> {
   const req: ModelRequest = {
-    system: SUMMARY_INSTRUCTION,
+    system: summaryInstruction(layer),
     messages: [
       {
         role: "user",
@@ -97,27 +112,50 @@ async function summarizeViaModel(
   return text.trim();
 }
 
-/**
- * Compact `messages`: summarize everything before the last `keepRecent` user
- * turns into one assistant note, then keep the recent tail verbatim. Returns
- * the original messages unchanged (collapsed: 0) when there isn't enough
- * history to be worth compacting.
- */
+function summaryHeader(layer: SummaryLayer): string {
+  return `${SUMMARY_PREFIX}${layer}]`;
+}
+
+function layerOfSummaryMessage(m: Message): SummaryLayer | null {
+  if (m.role !== "assistant") return null;
+  const text = m.content[0];
+  if (!text || text.type !== "text") return null;
+  const match = new RegExp(`^\\${SUMMARY_PREFIX}(working|archival)\\]`).exec(text.text);
+  return match?.[1] === "working" || match?.[1] === "archival"
+    ? match[1]
+    : null;
+}
+
+function summaryBody(m: Message): string {
+  const text = m.content[0];
+  if (!text || text.type !== "text") return "";
+  return text.text.replace(/^\[Summary layer=(working|archival)\]\n?/, "").trim();
+}
+
+function buildSummaryMessage(layer: SummaryLayer, body: string): Message {
+  return {
+    role: "assistant",
+    content: [
+      {
+        type: "text",
+        text: `${summaryHeader(layer)}\n${body}`,
+      },
+    ],
+  };
+}
+
 export async function compactHistory(
   provider: ModelProvider,
   messages: Message[],
   opts: CompactOptions = {},
 ): Promise<CompactResult> {
-  const keepRecent = opts.keepRecent ?? 4;
+  const mode = opts.mode ?? "soft";
+  const keepRecent = opts.keepRecent ?? DEFAULT_KEEP_RECENT[mode];
   const boundaries = userTurnBoundaries(messages);
-
-  // Need more turns than we intend to keep, or there's nothing to compact.
   if (boundaries.length <= keepRecent) {
     return { messages, summary: "", collapsed: 0 };
   }
 
-  // Cut at the boundary that begins the kept tail. Everything before it (a whole
-  // number of complete exchanges) is summarized; the tail stays verbatim.
   const cut = boundaries[boundaries.length - keepRecent]!;
   const olderPrefix = messages.slice(0, cut);
   const tail = messages.slice(cut);
@@ -125,29 +163,49 @@ export async function compactHistory(
     return { messages, summary: "", collapsed: 0 };
   }
 
-  const conversationText = olderPrefix.map(messageToText).join("\n\n");
-  const summary = await summarizeViaModel(provider, conversationText, opts.signal);
-  if (!summary) {
-    // Summarization produced nothing usable — leave history intact rather than
-    // destroying context.
+  const archivalSources: string[] = [];
+  const workingSources: Message[] = [];
+  for (const message of olderPrefix) {
+    const layer = layerOfSummaryMessage(message);
+    if (layer === "archival" || layer === "working") {
+      const body = summaryBody(message);
+      if (body) archivalSources.push(body);
+      continue;
+    }
+    workingSources.push(message);
+  }
+
+  let archivalSummary = "";
+  if (archivalSources.length > 0) {
+    archivalSummary = await summarizeViaModel(
+      provider,
+      archivalSources.join("\n\n"),
+      "archival",
+      opts.signal,
+    );
+  }
+
+  let workingSummary = "";
+  if (workingSources.length > 0) {
+    workingSummary = await summarizeViaModel(
+      provider,
+      workingSources.map(messageToText).join("\n\n"),
+      "working",
+      opts.signal,
+    );
+  }
+
+  if (!archivalSummary && !workingSummary) {
     return { messages, summary: "", collapsed: 0 };
   }
 
-  // One assistant message stands in for the collapsed prefix. Assistant role
-  // keeps the alternation valid: the kept tail begins with a user text turn.
-  const summaryMessage: Message = {
-    role: "assistant",
-    content: [
-      {
-        type: "text",
-        text: "[Summary of earlier conversation]\n" + summary,
-      },
-    ],
-  };
+  const compacted: Message[] = [];
+  if (archivalSummary) compacted.push(buildSummaryMessage("archival", archivalSummary));
+  if (workingSummary) compacted.push(buildSummaryMessage("working", workingSummary));
 
   return {
-    messages: [summaryMessage, ...tail],
-    summary,
+    messages: [...compacted, ...tail],
+    summary: [archivalSummary, workingSummary].filter(Boolean).join("\n\n"),
     collapsed: olderPrefix.length,
   };
 }

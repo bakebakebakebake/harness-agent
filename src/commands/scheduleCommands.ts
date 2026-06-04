@@ -11,6 +11,7 @@ import {
 import {
   isSchedulerRunning,
   runDueJobs,
+  runtimeSettingsForJobs,
   schedulerLogPath,
   schedulerRunnerPid,
   startSchedulerDaemon,
@@ -18,6 +19,8 @@ import {
 } from "../scheduler/runner.js";
 import type { ScheduleType } from "../scheduler/types.js";
 import type { ScheduledJob } from "../scheduler/types.js";
+import { loadRepoAgentConfig } from "../ext/repoConfig.js";
+import { schedulerPermissionSummary } from "../scheduler/policy.js";
 
 function shortTime(iso: string | undefined): string {
   if (!iso) return "-";
@@ -35,8 +38,17 @@ function formatJob(job: ReturnType<typeof loadSchedulerStore>["jobs"][number]): 
     `  ${cyan(job.name)} ${dim(`(${job.id.slice(0, 8)})`)}\n` +
     `    ${dim("schedule")} ${job.scheduleType} ${symbols.dot} ${job.scheduleSpec}\n` +
     `    ${dim("next")} ${job.enabled ? shortTime(job.nextRunAt) : dim("paused")}\n` +
-    `    ${dim("last")} ${job.lastRunStatus ?? "idle"} ${symbols.dot} ${shortTime(job.lastRunAt)}`
+    `    ${dim("last")} ${job.lastRunStatus ?? "idle"} ${symbols.dot} ${shortTime(job.lastRunAt)}` +
+    (job.lastRunError ? `\n    ${dim("error")} ${job.lastRunError}` : "")
   );
+}
+
+function effectiveSchedulerStatus(store: ReturnType<typeof loadSchedulerStore>) {
+  const settings = runtimeSettingsForJobs(store.jobs);
+  const latestError = [...store.jobs]
+    .filter((job) => job.lastRunStatus === "error" && job.lastRunError)
+    .sort((a, b) => (b.lastRunAt ?? "").localeCompare(a.lastRunAt ?? ""))[0];
+  return { settings, latestError };
 }
 
 function jobPickerItems(jobs: readonly ScheduledJob[]): Array<{
@@ -153,20 +165,33 @@ export const scheduleCommand: SlashCommand = {
       } else {
         ctx.out(bold("  Scheduler"));
         ctx.out(`  ${dim("runner")} ${isSchedulerRunning() ? green("running") : yellow("stopped")}`);
-        ctx.out(`  ${dim("pid")}    ${schedulerRunnerPid() ?? dim("(none)")}`);
-        ctx.out(`  ${dim("jobs")}   ${store.jobs.length}`);
-        if (store.jobs.length > 0) {
-          ctx.out("");
-          for (const job of store.jobs) ctx.out(formatJob(job));
+      ctx.out(`  ${dim("pid")}    ${schedulerRunnerPid() ?? dim("(none)")}`);
+      ctx.out(`  ${dim("jobs")}   ${store.jobs.length}`);
+      const { settings, latestError } = effectiveSchedulerStatus(store);
+      ctx.out(`  ${dim("poll")}   ${settings.pollIntervalSeconds}s`);
+      ctx.out(`  ${dim("rotate")} ${settings.logRotationBytes} bytes ${symbols.dot} ${settings.logRotationFiles} files`);
+      if (latestError?.lastRunError) {
+        ctx.out(`  ${dim("last error")} ${latestError.name} ${symbols.dot} ${latestError.lastRunError}`);
+      }
+      if (store.jobs.length > 0) {
+        ctx.out("");
+        for (const job of store.jobs) ctx.out(formatJob(job));
         }
       }
       return {};
     }
     if (sub === "status") {
+      const { settings, latestError } = effectiveSchedulerStatus(store);
       ctx.out(bold("  Scheduler status"));
       ctx.out(`  ${dim("runner")} ${isSchedulerRunning() ? green("running") : yellow("stopped")}`);
+      ctx.out(`  ${dim("pid")} ${schedulerRunnerPid() ?? dim("(none)")}`);
       ctx.out(`  ${dim("pid file")} ${schedulerRunnerPidPath()}`);
       ctx.out(`  ${dim("log")} ${schedulerLogPath()}`);
+      ctx.out(`  ${dim("poll")} ${settings.pollIntervalSeconds}s`);
+      ctx.out(`  ${dim("rotate")} ${settings.logRotationBytes} bytes ${symbols.dot} ${settings.logRotationFiles} files`);
+      if (latestError?.lastRunError) {
+        ctx.out(`  ${dim("last error")} ${latestError.name} ${symbols.dot} ${latestError.lastRunError}`);
+      }
       return {};
     }
     if (sub === "list") {
@@ -196,6 +221,9 @@ export const scheduleCommand: SlashCommand = {
       startSchedulerDaemon();
       ctx.out(green(`  Added job "${job.name}" (${job.id.slice(0, 8)}).`));
       ctx.out(dim(`  Next run: ${shortTime(job.nextRunAt)}`));
+      for (const line of schedulerPermissionSummary(loadRepoAgentConfig(job.cwd))) {
+        ctx.out(dim(`  ${line}`));
+      }
       return {};
     }
     const target = (args[1] ?? "").trim();
@@ -219,6 +247,9 @@ export const scheduleCommand: SlashCommand = {
       ctx.out(`    ${dim("profile")} ${job.profileName ?? "(env/.env)"}`);
       ctx.out(`    ${dim("model")} ${job.model}`);
       ctx.out(`    ${dim("prompt")} ${job.prompt}`);
+      for (const line of schedulerPermissionSummary(loadRepoAgentConfig(job.cwd))) {
+        ctx.out(`    ${dim(line)}`);
+      }
       return {};
     }
     if (sub === "remove") {

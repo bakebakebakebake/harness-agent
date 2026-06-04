@@ -4,6 +4,9 @@ import {
   readFileSync,
   writeFileSync,
   appendFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -68,11 +71,41 @@ export function appendSchedulerRun(record: SchedulerRunRecord): string {
 
 export function appendSchedulerLog(line: string): void {
   mkdirSync(schedulerDir(), { recursive: true });
+  rotateSchedulerLogIfNeeded();
   appendFileSync(
     schedulerRunnerLogPath(),
     `[${new Date().toISOString()}] ${line}\n`,
     "utf8",
   );
+}
+
+export function rotateSchedulerLogIfNeeded(opts?: {
+  maxBytes?: number;
+  maxFiles?: number;
+}): void {
+  const path = schedulerRunnerLogPath();
+  const maxBytes = opts?.maxBytes;
+  const maxFiles = opts?.maxFiles ?? 3;
+  if (!maxBytes || maxBytes <= 0 || !existsSync(path)) return;
+  let size = 0;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return;
+  }
+  if (size < maxBytes) return;
+
+  for (let i = Math.max(1, maxFiles - 1); i >= 1; i--) {
+    const from = `${path}.${i}`;
+    const to = `${path}.${i + 1}`;
+    if (!existsSync(from)) continue;
+    if (i + 1 > maxFiles) {
+      unlinkSync(from);
+      continue;
+    }
+    renameSync(from, to);
+  }
+  renameSync(path, `${path}.1`);
 }
 
 export function createScheduledJob(input: {

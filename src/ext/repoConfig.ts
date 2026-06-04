@@ -5,12 +5,25 @@ export interface RepoAgentConfig {
   disabledSkills: string[];
   blockedCommands: string[];
   protectedPaths: string[];
+  scheduler: SchedulerAgentConfig;
+}
+
+export interface SchedulerAgentConfig {
+  allowedTools: string[];
+  allowedCommandPatterns: string[];
+  pollIntervalSeconds?: number;
+  logRotationBytes?: number;
+  logRotationFiles?: number;
 }
 
 const DEFAULT_CONFIG: RepoAgentConfig = {
   disabledSkills: [],
   blockedCommands: [],
   protectedPaths: [],
+  scheduler: {
+    allowedTools: [],
+    allowedCommandPatterns: [],
+  },
 };
 
 function normalizeList(values: unknown, lower = false): string[] {
@@ -26,10 +39,37 @@ function normalizeList(values: unknown, lower = false): string[] {
 function parseConfig(raw: unknown): RepoAgentConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...DEFAULT_CONFIG };
   const rec = raw as Record<string, unknown>;
+  const scheduler = parseSchedulerConfig(rec.scheduler);
   return {
     disabledSkills: normalizeList(rec.disabledSkills, true),
     blockedCommands: normalizeList(rec.blockedCommands, true),
     protectedPaths: normalizeList(rec.protectedPaths),
+    scheduler,
+  };
+}
+
+function positiveInt(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) return undefined;
+  return value;
+}
+
+function parseSchedulerConfig(raw: unknown): SchedulerAgentConfig {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ...DEFAULT_CONFIG.scheduler };
+  }
+  const rec = raw as Record<string, unknown>;
+  return {
+    allowedTools: normalizeList(rec.allowedTools, true),
+    allowedCommandPatterns: normalizeList(rec.allowedCommandPatterns, true),
+    ...(positiveInt(rec.pollIntervalSeconds) !== undefined
+      ? { pollIntervalSeconds: positiveInt(rec.pollIntervalSeconds) }
+      : {}),
+    ...(positiveInt(rec.logRotationBytes) !== undefined
+      ? { logRotationBytes: positiveInt(rec.logRotationBytes) }
+      : {}),
+    ...(positiveInt(rec.logRotationFiles) !== undefined
+      ? { logRotationFiles: positiveInt(rec.logRotationFiles) }
+      : {}),
   };
 }
 
@@ -76,6 +116,22 @@ export function saveRepoAgentConfig(cwd: string, config: RepoAgentConfig): strin
         disabledSkills: normalizeList(config.disabledSkills, true),
         blockedCommands: normalizeList(config.blockedCommands, true),
         protectedPaths: normalizeList(config.protectedPaths),
+        scheduler: {
+          allowedTools: normalizeList(config.scheduler.allowedTools, true),
+          allowedCommandPatterns: normalizeList(
+            config.scheduler.allowedCommandPatterns,
+            true,
+          ),
+          ...(positiveInt(config.scheduler.pollIntervalSeconds) !== undefined
+            ? { pollIntervalSeconds: positiveInt(config.scheduler.pollIntervalSeconds) }
+            : {}),
+          ...(positiveInt(config.scheduler.logRotationBytes) !== undefined
+            ? { logRotationBytes: positiveInt(config.scheduler.logRotationBytes) }
+            : {}),
+          ...(positiveInt(config.scheduler.logRotationFiles) !== undefined
+            ? { logRotationFiles: positiveInt(config.scheduler.logRotationFiles) }
+            : {}),
+        },
       },
       null,
       2,

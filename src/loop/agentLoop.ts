@@ -107,7 +107,7 @@ export async function* runAgentLoop(
     let reasoningBuf = "";
     const pending = new Map<string, PendingToolCall>();
     const order: string[] = [];
-    let fatal: { message: string; retryable: boolean } | null = null;
+    let fatal: { message: string; retryable: boolean; contextOverflow?: boolean } | null = null;
 
     const req = {
       system,
@@ -136,7 +136,11 @@ export async function* runAgentLoop(
       } else if (ev.type === "message_stop") {
         yield { type: "usage", usage: ev.usage, stopReason: ev.stopReason };
       } else if (ev.type === "error") {
-        fatal = { message: ev.error.message, retryable: ev.error.retryable };
+        fatal = {
+          message: ev.error.message,
+          retryable: ev.error.retryable,
+          ...(ev.error.contextOverflow ? { contextOverflow: true } : {}),
+        };
       }
     }
 
@@ -161,7 +165,12 @@ export async function* runAgentLoop(
     }
 
     if (fatal) {
-      yield { type: "error", message: fatal.message, retryable: fatal.retryable };
+      yield {
+        type: "error",
+        message: fatal.message,
+        retryable: fatal.retryable,
+        ...(fatal.contextOverflow ? { contextOverflow: true } : {}),
+      };
       yield { type: "done", reason: "error", turns: turn };
       return;
     }

@@ -205,6 +205,10 @@ describe("createGate — modes (#5)", () => {
         disabledSkills: [],
         blockedCommands: ["rm -rf"],
         protectedPaths: ["src/secret"],
+        scheduler: {
+          allowedTools: [],
+          allowedCommandPatterns: [],
+        },
       }),
     });
     const deniedShell = await gate({

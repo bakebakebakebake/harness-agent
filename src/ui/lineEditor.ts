@@ -101,6 +101,8 @@ export interface EditorOptions {
    * fresh. Return "" to omit. Ignored in pick/secret modes.
    */
   footer?: () => string;
+  /** Repaint viewport content before redrawing the input region on resize. */
+  replayViewport?: (reservedRows: number) => void;
 }
 
 /** Outcome of one editor run. */
@@ -158,15 +160,23 @@ class Editor {
   private readonly history: string[];
   private readonly opts: EditorOptions;
   private readonly resolve: (r: EditorResult) => void;
+  private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly onTerminalRefresh = (): void => {
+    if (this.resizeTimer) clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(() => this.handleTerminalRefresh(), 40);
+  };
+
+  private handleTerminalRefresh(): void {
     logger.debug("editor terminal refresh");
     if (!this.opts.keys.isTTY) return;
-    this.restoreRegionAnchor();
-    stdout.write("\x1b[J");
+    this.resizeTimer = null;
+    const view = this.buildCurrentView();
+    stdout.write("\x1b[2J\x1b[H");
+    this.opts.replayViewport?.(view.rows.length + 1);
     this.lastRenderedRows = [];
     this.lastView = null;
-    this.draw();
-  };
+    this.paintView(view);
+  }
 
   constructor(opts: EditorOptions, resolve: (r: EditorResult) => void) {
     this.opts = opts;
@@ -200,6 +210,10 @@ class Editor {
     this.opts.keys.onKey(null);
     process.off("SIGWINCH", this.onTerminalRefresh);
     process.off("SIGCONT", this.onTerminalRefresh);
+    if (this.resizeTimer) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
+    }
     // Collapse the drawn region to just the prompt + submitted line (drop the
     // menu/picker rows below), leaving the cursor at the end so the line stays
     // in scrollback. We move from wherever the cursor currently is to the
@@ -943,25 +957,30 @@ class Editor {
 
   private paintView(view: RenderView): void {
     if (!this.opts.keys.isTTY) return;
-    this.restoreRegionAnchor();
+    stdout.write("\x1b[?25l");
+    try {
+      this.restoreRegionAnchor();
 
-    if (shouldFullRedraw(this.lastView, view)) {
-      stdout.write("\x1b[J");
-      stdout.write(view.rows.join("\n"));
-    } else {
-      const changed = new Set(changedRowIndices(this.lastRenderedRows, view.rows));
-      for (let i = 0; i < view.rows.length; i++) {
-        if (i > 0) stdout.write("\x1b[1B\r");
-        if (changed.has(i)) stdout.write("\x1b[2K" + (view.rows[i] ?? ""));
+      if (shouldFullRedraw(this.lastView, view)) {
+        stdout.write("\x1b[J");
+        stdout.write(view.rows.join("\n"));
+      } else {
+        const changed = new Set(changedRowIndices(this.lastRenderedRows, view.rows));
+        for (let i = 0; i < view.rows.length; i++) {
+          if (i > 0) stdout.write("\x1b[1B\r");
+          if (changed.has(i)) stdout.write("\x1b[2K" + (view.rows[i] ?? ""));
+        }
       }
-    }
 
-    this.lastRenderedRows = [...view.rows];
-    this.lastView = view;
-    const rowsUp = view.rows.length - 1 - view.cursorRowInRegion;
-    if (rowsUp > 0) stdout.write(`\x1b[${rowsUp}A`);
-    stdout.write("\r");
-    if (view.targetCol > 0) stdout.write(`\x1b[${view.targetCol}C`);
+      this.lastRenderedRows = [...view.rows];
+      this.lastView = view;
+      const rowsUp = view.rows.length - 1 - view.cursorRowInRegion;
+      if (rowsUp > 0) stdout.write(`\x1b[${rowsUp}A`);
+      stdout.write("\r");
+      if (view.targetCol > 0) stdout.write(`\x1b[${view.targetCol}C`);
+    } finally {
+      stdout.write("\x1b[?25h");
+    }
   }
 
   private firstSelectableIndex(items: EditorMenuItem[]): number {

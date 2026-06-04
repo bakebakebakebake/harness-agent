@@ -116,7 +116,6 @@ export function buildRenderView(opts: RenderViewOptions): RenderView {
       targetCol: visibleWidth("  Search: ") + visibleWidth(opts.pickQuery ?? ""),
       collapseRows,
       structureKey: `pick|items:${menu.rows.length}|search:${Boolean(opts.pickQuery)}`,
-      preferFullRedraw: true,
     };
   }
 
@@ -194,7 +193,6 @@ export function buildRenderView(opts: RenderViewOptions): RenderView {
     collapseRows,
     structureKey:
       `frame|tone:${tone}|badges:${badgeRows.length}|content:${contentRows.length}|menu:${menu.rows.length}|menuSearch:${menuSearch.length}|footer:${footerRows.length}`,
-    preferFullRedraw: opts.mode === "menu",
   };
 }
 

@@ -86,6 +86,8 @@ export interface LineReaderOptions {
   footer?: () => string;
   /** Visible labels for next-turn context like selected skills. */
   badges?: () => string[];
+  /** Repaint the viewport content that should remain above the input region. */
+  replayViewport?: (reservedRows: number) => void;
 }
 
 export class LineReader {
@@ -160,6 +162,7 @@ export class LineReader {
       prompt: present.prompt,
       history: this.history,
       ...(this.opts.badges ? { badges: this.opts.badges } : {}),
+      ...(this.opts.replayViewport ? { replayViewport: this.opts.replayViewport } : {}),
       ...(seed ? { seed } : {}),
       ...(menu ? { menu } : {}),
       ...(fileMenu ? { fileMenu } : {}),

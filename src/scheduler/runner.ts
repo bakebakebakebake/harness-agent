@@ -9,21 +9,33 @@ import { loadSkills, formatSkillCatalog } from "../ext/skills.js";
 import { newSession, saveSession } from "../sessions.js";
 import { LocalMcpRuntime } from "../mcp/runtime.js";
 import { runAgentLoop } from "../loop/agentLoop.js";
-import { createGate, denyingConfirmer } from "../permissions/confirm.js";
-import { PermissionPolicy } from "../permissions/policy.js";
 import { cloneTodos, type TodoItem } from "../todos.js";
 import { formatMemoryContext, retrieveMemoryContext } from "../memory/retrieve.js";
+import { loadRepoAgentConfig } from "../ext/repoConfig.js";
 import {
-  appendSchedulerLog,
+  appendSchedulerLog as appendSchedulerLogStore,
   appendSchedulerRun,
   computeNextRunAt,
   loadSchedulerStore,
+  rotateSchedulerLogIfNeeded,
   saveSchedulerStore,
   schedulerRunnerLogPath,
   schedulerRunnerPidPath,
   updateJob,
 } from "./store.js";
 import type { ScheduledJob, SchedulerRunRecord } from "./types.js";
+import {
+  createSchedulerGate,
+  DEFAULT_SCHEDULER_LOG_ROTATION_BYTES,
+  DEFAULT_SCHEDULER_LOG_ROTATION_FILES,
+  DEFAULT_SCHEDULER_POLL_INTERVAL_SECONDS,
+} from "./policy.js";
+
+export interface SchedulerRuntimeSettings {
+  pollIntervalSeconds: number;
+  logRotationBytes: number;
+  logRotationFiles: number;
+}
 
 function resolveJobConfig(job: ScheduledJob): Config | null {
   if (job.profileName) {
@@ -50,11 +62,13 @@ export async function runScheduledJob(job: ScheduledJob): Promise<SchedulerRunRe
   const mcp = new LocalMcpRuntime(job.cwd);
   const history: import("../model/types.js").Message[] = [];
   let todos: TodoItem[] = [];
-  const policy = new PermissionPolicy();
-  const gate = createGate({
-    policy,
-    confirmer: denyingConfirmer,
+  const repoConfig = loadRepoAgentConfig(job.cwd);
+  const gate = createSchedulerGate({
     workdir: job.cwd,
+    repoConfig: () => repoConfig,
+    onDeny: (reason) => {
+      appendSchedulerLog(`[${job.id}] denied: ${reason}`, runtimeSettingsForJobs([job]));
+    },
   });
   const skillCatalog = formatSkillCatalog(loadSkills(job.cwd));
   const memoryBlock = config.memoryEnabled
@@ -135,10 +149,14 @@ export async function runDueJobs(opts: { onlyJobId?: string } = {}): Promise<num
       updateJob(store, job.id, {
         lastRunStatus: record.status,
         lastRunAt: record.endedAt,
+        ...(record.error ? { lastRunError: record.error } : { lastRunError: undefined }),
         nextRunAt,
         enabled: job.scheduleType === "once" ? false : job.enabled,
       });
-      appendSchedulerLog(`job ${job.id} finished: ${record.status}`);
+      appendSchedulerLog(
+        `job ${job.id} finished: ${record.status}`,
+        runtimeSettingsForJobs(store.jobs),
+      );
     } catch (err) {
       const endedAt = new Date().toISOString();
       appendSchedulerRun({
@@ -152,9 +170,17 @@ export async function runDueJobs(opts: { onlyJobId?: string } = {}): Promise<num
       updateJob(store, job.id, {
         lastRunStatus: "error",
         lastRunAt: endedAt,
-        nextRunAt: computeNextRunAt(job.scheduleType, job.scheduleSpec, endedAt),
+        lastRunError: (err as Error).message,
+        nextRunAt:
+          job.scheduleType === "once"
+            ? undefined
+            : computeNextRunAt(job.scheduleType, job.scheduleSpec, endedAt),
+        enabled: job.scheduleType === "once" ? false : job.enabled,
       });
-      appendSchedulerLog(`job ${job.id} failed: ${(err as Error).message}`);
+      appendSchedulerLog(
+        `job ${job.id} failed: ${(err as Error).message}`,
+        runtimeSettingsForJobs(store.jobs),
+      );
     }
     saveSchedulerStore(store);
     ran += 1;
@@ -164,15 +190,21 @@ export async function runDueJobs(opts: { onlyJobId?: string } = {}): Promise<num
 
 export async function runSchedulerDaemon(opts: { once?: boolean; onlyJobId?: string } = {}): Promise<void> {
   writeFileSync(schedulerRunnerPidPath(), String(process.pid), "utf8");
-  appendSchedulerLog(`runner started${opts.once ? " (once)" : ""}`);
+  appendSchedulerLog(
+    `runner started${opts.once ? " (once)" : ""}`,
+    runtimeSettingsForJobs(loadSchedulerStore().jobs),
+  );
   try {
     do {
       await runDueJobs({ onlyJobId: opts.onlyJobId });
       if (opts.once) break;
-      await new Promise((resolve) => setTimeout(resolve, 30_000));
+      const settings = runtimeSettingsForJobs(loadSchedulerStore().jobs);
+      await new Promise((resolve) =>
+        setTimeout(resolve, settings.pollIntervalSeconds * 1000),
+      );
     } while (true);
   } finally {
-    appendSchedulerLog("runner stopped");
+    appendSchedulerLog("runner stopped", runtimeSettingsForJobs(loadSchedulerStore().jobs));
     if (existsSync(schedulerRunnerPidPath())) unlinkSync(schedulerRunnerPidPath());
   }
 }
@@ -226,4 +258,43 @@ export function stopSchedulerDaemon(): boolean {
 
 export function schedulerLogPath(): string {
   return schedulerRunnerLogPath();
+}
+
+export function runtimeSettingsForJobs(
+  jobs: readonly ScheduledJob[],
+): SchedulerRuntimeSettings {
+  let pollIntervalSeconds = DEFAULT_SCHEDULER_POLL_INTERVAL_SECONDS;
+  let logRotationBytes = DEFAULT_SCHEDULER_LOG_ROTATION_BYTES;
+  let logRotationFiles = DEFAULT_SCHEDULER_LOG_ROTATION_FILES;
+
+  for (const job of jobs) {
+    const config = loadRepoAgentConfig(job.cwd).scheduler;
+    if (config.pollIntervalSeconds) {
+      pollIntervalSeconds = Math.min(pollIntervalSeconds, config.pollIntervalSeconds);
+    }
+    if (config.logRotationBytes) {
+      logRotationBytes = Math.min(logRotationBytes, config.logRotationBytes);
+    }
+    if (config.logRotationFiles) {
+      logRotationFiles = Math.max(logRotationFiles, config.logRotationFiles);
+    }
+  }
+
+  return {
+    pollIntervalSeconds,
+    logRotationBytes,
+    logRotationFiles,
+  };
+}
+
+export function appendSchedulerLog(
+  line: string,
+  settings?: SchedulerRuntimeSettings,
+): void {
+  const effective = settings ?? runtimeSettingsForJobs(loadSchedulerStore().jobs);
+  rotateSchedulerLogIfNeeded({
+    maxBytes: effective.logRotationBytes,
+    maxFiles: effective.logRotationFiles,
+  });
+  appendSchedulerLogStore(line);
 }

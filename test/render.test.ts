@@ -31,4 +31,43 @@ describe("Renderer", () => {
     expect(joined).toContain("[~] Add tests");
     expect(joined).not.toContain("✓");
   });
+
+  it("replays the active viewport after SIGWINCH during streaming output", () => {
+    vi.useFakeTimers();
+    const ttyDesc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    try {
+      Object.defineProperty(process.stdout, "isTTY", {
+        value: true,
+        configurable: true,
+      });
+      const out: string[] = [];
+      writeSpy.mockImplementation(((chunk: string | Uint8Array) => {
+        out.push(String(chunk));
+        return true;
+      }) as typeof process.stdout.write);
+
+      const renderer = new Renderer({
+        replayPrelude: () => {
+          process.stdout.write("[prelude]\n");
+        },
+      });
+      renderer.activateViewport();
+      renderer.on({ type: "text_delta", text: "Hello **world**" });
+      process.emit("SIGWINCH", "SIGWINCH");
+      vi.advanceTimersByTime(20);
+      expect(out.join("")).not.toContain("[prelude]");
+
+      renderer.on({ type: "done", reason: "end_turn", turns: 1 });
+      vi.advanceTimersByTime(60);
+      renderer.deactivateViewport();
+
+      const joined = out.join("");
+      expect(joined).toContain("\x1b[2J\x1b[H");
+      expect(joined).toContain("[prelude]");
+      expect(joined).toContain("Hello world");
+    } finally {
+      if (ttyDesc) Object.defineProperty(process.stdout, "isTTY", ttyDesc);
+      vi.useRealTimers();
+    }
+  });
 });

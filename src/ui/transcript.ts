@@ -20,13 +20,25 @@ export function renderTranscript(
   history: Message[],
   write: (line: string) => void,
 ): void {
-  for (const m of history) {
+  for (const line of transcriptLines(history)) {
+    write(line);
+  }
+}
+
+export function transcriptLines(history: Message[]): string[] {
+  const lines: string[] = [];
+  for (const [index, m] of history.entries()) {
     if (m.role === "user") {
-      renderUserMessage(m, write);
+      renderUserMessage(m, (line) => pushRenderedLine(lines, line));
     } else {
-      renderAssistantMessage(m, write);
+      renderAssistantMessage(m, history, index, (line) => pushRenderedLine(lines, line));
     }
   }
+  return lines;
+}
+
+function pushRenderedLine(lines: string[], line: string): void {
+  lines.push(...line.split("\n"));
 }
 
 /** A user message: plain text echoed under the `›` prompt; tool_results skipped
@@ -54,13 +66,20 @@ function renderUserMessage(m: Message, write: (line: string) => void): void {
 }
 
 /** An assistant message: markdown text, then any tool calls it issued. */
-function renderAssistantMessage(m: Message, write: (line: string) => void): void {
+function renderAssistantMessage(
+  m: Message,
+  history: Message[],
+  index: number,
+  write: (line: string) => void,
+): void {
   for (const b of m.content) {
     if (b.type === "text") {
       const rendered = renderMarkdown(b.text);
       if (rendered.trim()) write(rendered);
     } else if (b.type === "tool_use") {
       write(`  ${cyan(symbols.arrow)} ${toolCallLine(b.name, b.input)}`);
+      const result = findToolResult(history.slice(index + 1, index + 3), b.id);
+      if (result) write(toolResultLine(result.content, result.isError));
     }
   }
   write("");

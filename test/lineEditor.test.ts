@@ -172,6 +172,29 @@ describe("lineEditor clipboard image paste", () => {
   });
 });
 
+describe("lineEditor resize replay", () => {
+  it("replays the viewport before redrawing the input region on SIGWINCH", async () => {
+    vi.useFakeTimers();
+    try {
+      const keys = new TtyKeys();
+      let reservedRows = 0;
+      const p = run(keys, {
+        replayViewport: (rows: number) => {
+          reservedRows = rows;
+        },
+      });
+      process.emit("SIGWINCH", "SIGWINCH");
+      vi.advanceTimersByTime(60);
+      keys.type("ok");
+      keys.send("return");
+      await p;
+      expect(reservedRows).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("lineEditor double Esc rewind", () => {
   it("submits /rewind after two Esc presses on an empty prompt", async () => {
     const keys = new FakeKeys();
@@ -517,6 +540,38 @@ describe("lineEditor render views", () => {
     expect(shouldFullRedraw(frame, movedCursor)).toBe(false);
     expect(shouldFullRedraw(frame, withMenu)).toBe(true);
   });
+
+  it("keeps slash-menu selection changes on the partial redraw path", () => {
+    const menuA = buildRenderView({
+      prompt: "> ",
+      lines: ["/pro"],
+      row: 0,
+      col: 4,
+      mode: "menu",
+      cols: 80,
+      menuItems: [
+        { label: "/profile", value: "/profile" },
+        { label: "/prompt", value: "/prompt" },
+      ],
+      menuSel: 0,
+      footer: "workdir / main",
+    });
+    const menuB = buildRenderView({
+      prompt: "> ",
+      lines: ["/pro"],
+      row: 0,
+      col: 4,
+      mode: "menu",
+      cols: 80,
+      menuItems: [
+        { label: "/profile", value: "/profile" },
+        { label: "/prompt", value: "/prompt" },
+      ],
+      menuSel: 1,
+      footer: "workdir / main",
+    });
+    expect(shouldFullRedraw(menuA, menuB)).toBe(false);
+  });
 });
 
 describe("lineEditor TTY redraws", () => {
@@ -566,12 +621,43 @@ describe("lineEditor TTY redraws", () => {
 
     chunks.length = 0;
     keys.send("down");
-    expect(chunks.join("")).toContain("\x1b[J");
+    const moved = chunks.join("");
+    expect(moved).not.toContain("\x1b[J");
+    expect(moved).toContain("\x1b[2K");
 
     chunks.length = 0;
     keys.send("return");
     const submit = chunks.join("");
     expect(submit).toContain("> /prompt");
     expect(await p).toEqual({ kind: "submit", value: "/prompt" });
+  });
+
+  it("hides the cursor during menu redraws and restores it after positioning", async () => {
+    const chunks: string[] = [];
+    writeSpy.mockImplementation(((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const keys = new TtyKeys();
+    const p = run(keys, {
+      menu: (buffer: string) =>
+        buffer.startsWith("/")
+          ? [
+              { label: "/profile", value: "/profile" },
+              { label: "/prompt", value: "/prompt" },
+            ]
+          : null,
+    });
+
+    chunks.length = 0;
+    keys.type("/");
+    keys.send("down");
+    const moved = chunks.join("");
+    expect(moved).toContain("\x1b[?25l");
+    expect(moved).toContain("\x1b[?25h");
+
+    keys.send("return");
+    await p;
   });
 });

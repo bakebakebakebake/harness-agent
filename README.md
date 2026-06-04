@@ -12,6 +12,8 @@ A local-first coding agent CLI with:
 - inline `#skill` attach, repo protection rules, and Tavily-first search
 - multimodal image input from files, drag-drop paths, and clipboard paste
 - local scheduled jobs and macOS GUI automation hooks
+- source-backed TUI resize replay so transcript tables and input layout reflow at the new terminal width
+- layered context compaction for long sessions with soft, strong, and emergency modes
 
 ## Requirements
 
@@ -113,6 +115,14 @@ Useful commands inside the app:
 - `/image` without arguments now opens a picker with paste / list / remove /
   clear actions plus detected project images, so you usually do not need to
   remember subcommands first.
+- TTY resize replay now rebuilds the visible transcript from source data instead
+  of trusting stale terminal rows. That gives markdown tables and wrapped input
+  a chance to reflow against the current terminal width after `SIGWINCH`.
+- `/compact` and auto-compaction now share the same layered pipeline:
+  recent turns stay verbatim, nearby history becomes a working summary, and
+  older summaries are folded into a shorter archival layer. Auto-compaction
+  starts around `70%` context use, gets stronger around `85%`, and switches to
+  emergency compaction when a provider reports context overflow.
 - When the draft is empty, `Backspace` now removes attached next-turn items one
   by one in reverse order, across queued images, skills, and MCP server hints.
 - If the draft already has text, `↑` now steps into the attached `skills:` and
@@ -183,7 +193,14 @@ Current keys:
 {
   "disabledSkills": ["review"],
   "blockedCommands": ["rm -rf", "git reset --hard"],
-  "protectedPaths": ["src/secret", ".env"]
+  "protectedPaths": ["src/secret", ".env"],
+  "scheduler": {
+    "allowedTools": ["bash", "write"],
+    "allowedCommandPatterns": ["npm test", "npm run lint"],
+    "pollIntervalSeconds": 20,
+    "logRotationBytes": 500000,
+    "logRotationFiles": 4
+  }
 }
 ```
 
@@ -193,6 +210,12 @@ Notes:
 - `blockedCommands` only applies to model-driven `bash` / `shell` actions.
 - `protectedPaths` blocks model-driven `edit` / `write`, and also blocks shell
   commands that obviously target those paths.
+- `scheduler.allowedTools` allows selected medium/high-risk tools in detached
+  background jobs; low-risk tools stay allowed by default.
+- `scheduler.allowedCommandPatterns` further restricts scheduler `bash` /
+  `shell` calls to matching command substrings.
+- `scheduler.pollIntervalSeconds` and `scheduler.logRotation*` tune the shared
+  runner across all local jobs.
 - User-typed `!` commands are not blocked by `/protect`.
 
 ## Search Config
@@ -258,6 +281,9 @@ GUI commands:
 - `/gui doctor`
 
 The scheduler stores jobs, logs, and pid state under `~/.light-agent/scheduler/`.
+Each job also reads repo-local scheduler policy from `.agents/light-agent.json`,
+and `/schedule add`, `/schedule show`, and `/schedule status` surface the
+effective permissions and runner settings.
 
 ## Memory
 

@@ -6,7 +6,7 @@ import { collectOnboarding, applyOnboarding } from "./onboarding.js";
 import { createProvider } from "./model/index.js";
 import { defaultRegistry } from "./tools/registry.js";
 import { runAgentLoop } from "./loop/agentLoop.js";
-import { compactHistory } from "./loop/compact.js";
+import { compactHistory, compactModeForUsage } from "./loop/compact.js";
 import type { SessionState } from "./commands/registry.js";
 import { PermissionPolicy } from "./permissions/policy.js";
 import { createGate, type Confirmer, type ConfirmRequest } from "./permissions/confirm.js";
@@ -17,7 +17,7 @@ import { contextWindowFor } from "./model/contextWindow.js";
 import { beside, mascot, mascotTagline } from "./ui/mascot.js";
 import { InterruptController } from "./ui/interrupt.js";
 import { LineReader } from "./ui/input.js";
-import { renderTranscript } from "./ui/transcript.js";
+import { renderTranscript, transcriptLines } from "./ui/transcript.js";
 import { appendPromptBlocks, systemPrompt } from "./prompt.js";
 import { buildRegistry } from "./commands/builtins.js";
 import { loadStore, storePath } from "./profiles.js";
@@ -84,6 +84,9 @@ async function main(): Promise<void> {
   const commands = buildRegistry();
   // Load project/user extension commands (B2) so they appear in the menu/help.
   reloadExtensions(commands);
+  let state: SessionState | null = null;
+  let replayIdleViewport: ((reservedRows: number) => void) | null = null;
+  let replayStreamingViewport: (() => void) | null = null;
   // One stdin consumer (raw mode): a live `/` command menu, arrow pickers,
   // multiline input, and Ctrl-C that interrupts but never exits (B1/B3/B4).
   const reader = new LineReader({
@@ -129,16 +132,19 @@ async function main(): Promise<void> {
       return filtered.length > 0 ? filtered : null;
     },
     attachSkill: (skillName) => {
+      if (!state) return;
       const skill = loadSkills(process.cwd()).get(skillName.toLowerCase());
       if (!skill) return;
       attachSkillToState(state, skill);
     },
     attachClipboardImage: () => {
+      if (!state) throw new Error("Session is not ready for attachments yet.");
       const image = importClipboardImage();
       pushPendingAttachment(state, imageAttachment(image));
       state.seedInput ??= "";
     },
     attachDroppedImages: (text) => {
+      if (!state) return false;
       const images = detectDroppedImagePaths(text, state.config.workdir);
       if (images.length === 0) return false;
       for (const image of images) {
@@ -147,19 +153,26 @@ async function main(): Promise<void> {
       state.seedInput ??= "";
       return true;
     },
-    badges: () => attachmentBadges(state.pendingAttachments),
-    detachLastSkill: () => detachLastPendingAttachment(state),
-    attachments: () => groupPendingAttachments(state.pendingAttachments),
+    badges: () => (state ? attachmentBadges(state.pendingAttachments) : []),
+    detachLastSkill: () => (state ? detachLastPendingAttachment(state) : false),
+    attachments: () =>
+      state
+        ? groupPendingAttachments(state.pendingAttachments)
+        : { skills: [], mcps: [], images: [] },
     detachAttachment: (kind, label) =>
-      removePendingAttachment(state, kind, label),
+      state ? removePendingAttachment(state, kind, label) : false,
     // Tint the input frame cyan in plan mode (#8). `state` is initialized below
     // and this runs lazily on each draw, so it always sees the live mode.
-    planMode: () => state.mode === "plan",
+    planMode: () => state?.mode === "plan",
     // Bottom-left footer beneath the frame: workdir + cached git branch (#10).
-    footer: () => workdirLine({
-      workdir: state.config.workdir,
-      branch: gitBranchCached(state.config.workdir),
-    }),
+    footer: () =>
+      state
+        ? workdirLine({
+            workdir: state.config.workdir,
+            branch: gitBranchCached(state.config.workdir),
+          })
+        : "",
+    replayViewport: (reservedRows) => replayIdleViewport?.(reservedRows),
   });
   const ask = (prompt: string, opts?: { secret?: boolean }): Promise<string> =>
     opts?.secret ? reader.askSecret(prompt) : reader.ask(prompt);
@@ -205,7 +218,7 @@ async function main(): Promise<void> {
 
   // Session state with a mutable provider/config: slash commands can switch the
   // active profile and rebuild() the provider in place — no restart needed.
-  const state: SessionState = {
+  state = {
     config,
     provider: createProvider(config),
     profileName: loadStore().activeProfile,
@@ -264,6 +277,61 @@ async function main(): Promise<void> {
     },
   };
 
+  const splashLines = (): string[] => [
+    ...buildBannerLines(state.config, state.profileName),
+    "",
+    dim("  Type a request, ") +
+      cyan("/help") +
+      dim(" for commands, or ") +
+      cyan("/exit") +
+      dim(" to quit. ") +
+      dim("Type / for the command menu · ↑↓ history · Ctrl-C interrupts."),
+  ];
+
+  const viewportTranscriptLines = (): string[] =>
+    state!.history.length > 0 ? transcriptLines(state!.history) : splashLines();
+
+  const writeViewportPrelude = (
+    reservedRows: number,
+    opts?: { includeStatus?: boolean },
+  ): number => {
+    if (!reader.isTTY || !state) return 0;
+    const totalRows = Math.max(8, stdout.rows ?? 24);
+    const budget = Math.max(0, totalRows - Math.max(0, reservedRows));
+    const includeStatus = opts?.includeStatus ?? false;
+    const contentBudget = Math.max(0, budget - (includeStatus ? 1 : 0));
+    const content = viewportTranscriptLines();
+    const clipped =
+      contentBudget <= 0 ? [] : content.slice(Math.max(0, content.length - contentBudget));
+
+    if (clipped.length > 0) {
+      stdout.write(clipped.join("\n"));
+    }
+    if (includeStatus && budget > 0) {
+      if (clipped.length > 0) stdout.write("\n");
+      stdout.write(
+        statusLine({
+          model: state.config.model,
+          mode: state.mode,
+          used: state.estimateContext(),
+          total: contextWindowFor(state.config.model, state.config.contextWindow),
+          thinking: state.config.thinkingDepth ?? "off",
+        }),
+      );
+      return clipped.length + 1;
+    }
+    return clipped.length;
+  };
+
+  replayIdleViewport = (reservedRows) => {
+    const written = writeViewportPrelude(reservedRows, { includeStatus: true });
+    if (written > 0) stdout.write("\n");
+  };
+  replayStreamingViewport = () => {
+    const written = writeViewportPrelude(0);
+    if (written > 0) stdout.write("\n");
+  };
+
   // The renderer streams loop events; its onUsage hook records the provider's
   // last-call usage for diagnostics while UI context uses a local whole-prompt
   // estimate.
@@ -271,6 +339,7 @@ async function main(): Promise<void> {
     onUsage: (u) => {
       state.usage = { input: u.inputTokens, output: u.outputTokens };
     },
+    replayPrelude: () => replayStreamingViewport?.(),
   });
 
   // Approval comes only from this interactive prompt — never from model or
@@ -412,6 +481,7 @@ async function main(): Promise<void> {
   // that was interrupted, so the user can edit and resend it (#7).
   let seedNext: string | undefined;
   while (true) {
+    renderer.deactivateViewport();
     // Lean one-line footer above the prompt: model · mode · thinking · ctx% (#9).
     if (reader.isTTY) {
       stdout.write(
@@ -521,6 +591,9 @@ async function main(): Promise<void> {
     }
 
     try {
+      let loopError: { message: string; retryable: boolean; contextOverflow?: boolean } | null =
+        null;
+      if (reader.isTTY) renderer.activateViewport();
       for await (const ev of runAgentLoop({
         provider: state.provider,
         registry,
@@ -547,7 +620,19 @@ async function main(): Promise<void> {
         runSubagent,
         mcp,
       })) {
+        if (ev.type === "error") loopError = ev;
         renderer.on(ev);
+      }
+      if (loopError?.contextOverflow) {
+        const last = state.history[state.history.length - 1];
+        if (last?.role === "user" && state.history.length === historyBefore + 1) {
+          state.history.pop();
+        }
+        seedNext = input;
+        await maybeAutoCompact(state, stdout.write.bind(stdout), {
+          contextOverflow: true,
+        });
+        stdout.write(dim("  Your question is back in the prompt.\n"));
       }
     } catch (err) {
       logger.error("agent loop failed", {
@@ -561,6 +646,7 @@ async function main(): Promise<void> {
         ),
       );
     } finally {
+      renderer.deactivateViewport();
       stopListening();
     }
     // If the turn was interrupted mid-stream (Ctrl-C), refill the next prompt
@@ -611,8 +697,6 @@ async function runInternalCommand(argv: string[]): Promise<boolean> {
   return true;
 }
 
-/** Fraction of the context window at which auto-compaction kicks in (#1). */
-const COMPACT_THRESHOLD = 0.85;
 const DEFAULT_SUBAGENT_TOOLS = [
   "read",
   "ls",
@@ -630,21 +714,27 @@ const DEFAULT_SUBAGENT_TOOLS = [
 async function maybeAutoCompact(
   state: SessionState,
   write: (s: string) => void,
+  opts: { contextOverflow?: boolean } = {},
 ): Promise<void> {
   const total = contextWindowFor(state.config.model, state.config.contextWindow);
-  if (total <= 0) return;
   const used = state.estimateContext();
-  const frac = used / total;
-  if (frac < COMPACT_THRESHOLD) return;
+  const mode = compactModeForUsage({
+    usedTokens: used,
+    totalTokens: total,
+    ...(opts.contextOverflow ? { contextOverflow: true } : {}),
+  });
+  if (!mode) return;
 
   write(
     dim(
-      `\n  Context at ${formatContextPercent(used, total)} — compacting older turns…\n`,
+      opts.contextOverflow
+        ? "\n  Provider reported context overflow — emergency compacting older turns…\n"
+        : `\n  Context at ${formatContextPercent(used, total)} — ${mode} compacting older turns…\n`,
     ),
   );
   let result;
   try {
-    result = await compactHistory(state.provider, state.history);
+    result = await compactHistory(state.provider, state.history, { mode });
   } catch (err) {
     write(dim(`  Auto-compaction skipped: ${(err as Error).message}\n`));
     return;
@@ -656,7 +746,11 @@ async function maybeAutoCompact(
   state.save();
   write("\x1b[2J\x1b[H"); // clear screen + home
   renderTranscript(state.history, (line) => write(line + "\n"));
-  write(dim(`  Compacted ${result.collapsed} message(s) to free context.\n`));
+  write(
+    dim(
+      `  Compacted ${result.collapsed} message(s) into layered summaries (${mode}).\n`,
+    ),
+  );
 }
 
 /**
@@ -705,6 +799,14 @@ function reloadExtensions(commands: ReturnType<typeof buildRegistry>): number {
 
 /** Print the boxed launch/status banner. */
 function printBanner(config: Config, profileName: string | null): void {
+  stdout.write(buildBannerBlock(config, profileName) + "\n");
+}
+
+function buildBannerLines(config: Config, profileName: string | null): string[] {
+  return buildBannerBlock(config, profileName).split("\n");
+}
+
+function buildBannerBlock(config: Config, profileName: string | null): string {
   const lines = [
     `${dim("profile")}  ${profileName ? cyan(profileName) : dim("(env/.env)")}  ${dim(symbols.dot)}  ${config.provider}`,
     `${dim("model")}    ${config.model}`,
@@ -724,7 +826,7 @@ function printBanner(config: Config, profileName: string | null): void {
     process.stdout.isTTY && inlineWidth <= cols
       ? beside(left, right, 3)
       : [...left, "", ...right].join("\n");
-  stdout.write(block + "\n");
+  return block;
 }
 
 function indent(text: string): string {

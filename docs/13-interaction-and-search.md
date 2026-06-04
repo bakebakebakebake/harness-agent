@@ -230,7 +230,59 @@ images: a.png, b.png
 - `web_search`
 - `web_fetch`
 
-## 6. `/mcp` 与 `/protect`
+## 6. 终端 resize 与表格重排
+
+当前 TTY 在收到终端窗口变化后,不会再继续依赖旧的屏幕行去“补丁式修复”。
+
+现在的处理方式更接近 Codex 这类 CLI:
+
+1. 输入区或流式输出区收到 `SIGWINCH`
+2. 清掉当前可视区域
+3. 从当前 transcript/source 重新组装可见内容
+4. 按新的终端宽度重新渲染 markdown、表格和输入框
+5. 再把当前输入区画回去
+
+这意味着:
+
+- markdown 表格会按**当前宽度**重新分列 / 截断 / 对齐
+- 输入框的换行会按**当前宽度**重新计算
+- 回到会话或正在 streaming 时,resize 后更不容易出现旧框线残留
+
+这套机制当前优先保证两类场景:
+
+- 正在输入时的 redraw
+- 正在流式输出时的 redraw
+
+当前实现还有一条明确约束:
+
+- **输入态**只由 line editor 接管 resize
+- **streaming 态**只由 renderer 接管 resize
+
+这样可以避免两边同时响应同一次 `SIGWINCH`,把清屏和重绘顺序打乱。
+
+另外,`/` 菜单和 picker 在仅仅是上下移动选中项时,现在优先走增量刷新:
+
+- 单纯选择变化时,只重画受影响的几行
+- 菜单数量、搜索框、footer、frame 结构变化时,才走整块重绘
+
+这能明显减轻“按上下时菜单闪一下”的感觉。
+
+现在的重绘链路固定为:
+
+1. 清掉当前可视区域
+2. 重放 banner / transcript tail / status 这些 source-backed 内容
+3. 按当前宽度重新渲染 markdown 和表格
+4. 最后重画输入框或当前 streaming turn
+
+这意味着 resize 后不再依赖“旧终端里还残留了哪些行”。
+
+如果你想验证这条链路,最直接的方式是:
+
+1. 先让模型输出一段带 markdown table 的内容
+2. 左右拉伸终端窗口
+3. 看表格和输入框是否按新宽度重排
+
+## 7. `/mcp` 与 `/protect`
 
 `/mcp` 现在会显示:
 
@@ -284,6 +336,29 @@ images: a.png, b.png
   - 管理本机后台任务
   - 第一版支持 `once`、`daily`、`weekly`
   - 状态、pid、log 都落在 `~/.light-agent/scheduler/`
+  - `/schedule status` 会显示 effective poll interval、pid、log path、最近错误
+  - `/schedule add` / `/schedule show` 会显示该任务当前命中的权限摘要
+
+后台任务权限现在单独受 repo 配置控制:
+
+```json
+{
+  "scheduler": {
+    "allowedTools": ["bash", "write"],
+    "allowedCommandPatterns": ["npm test", "npm run lint"],
+    "pollIntervalSeconds": 20,
+    "logRotationBytes": 500000,
+    "logRotationFiles": 4
+  }
+}
+```
+
+规则是:
+
+- `low` 风险工具默认可用
+- `medium/high` 需要命中 `allowedTools`
+- `bash` / `shell` 还需要命中 `allowedCommandPatterns`
+- repo protect 规则仍然生效
 - `/gui`
   - 列出当前已接通的 macOS GUI action
   - `doctor` 会检查 `osascript` / `System Events` 权限状态
@@ -321,6 +396,25 @@ images: a.png, b.png
 - push 到 `main`
 - pull request
 - `v*` tag
+
+## 10. `/compact` 与长会话
+
+`/compact` 现在和自动 compact 共用同一套多层实现:
+
+- `verbatim tail`
+  - 最近几轮原文保留
+- `working summary`
+  - 较近历史的高保真摘要
+- `archival summary`
+  - 更早历史的短摘要
+
+自动触发规则:
+
+- 约 `70%` 上下文占用: `soft`
+- 约 `85%` 上下文占用: `strong`
+- provider 报 `context overflow`: `emergency`
+
+紧急压缩触发后,当前问题会回填到输入框,这样你可以直接重发而不用重打一遍。
 
 都会跑:
 

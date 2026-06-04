@@ -37,7 +37,12 @@ export type LoopEvent =
     }
   | { type: "usage"; usage: Usage; stopReason: StopReason }
   | { type: "done"; reason: LoopStopReason; turns: number }
-  | { type: "error"; message: string; retryable: boolean };
+  | {
+      type: "error";
+      message: string;
+      retryable: boolean;
+      contextOverflow?: boolean;
+    };
 
 /** A pending tool call accumulated from the stream within one turn. */
 export interface PendingToolCall {

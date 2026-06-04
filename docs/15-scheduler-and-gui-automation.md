@@ -71,21 +71,56 @@ spec 规则:
 
 - 新增/恢复任务时,会尝试启动 detached runner
 - `run-now` 会立刻跑指定 job
-- `once` 任务成功跑完后会自动停用
+- `once` 任务无论成功还是失败,跑完后都会自动停用
 - 后台任务会生成独立 session,方便之后 `/resume`
+- runner 会按配置做日志轮换,避免 `runner.log` 无限增长
 
 ## 4. 背景执行边界
 
 当前后台任务会复用现有 agent loop,但它没有实时人工确认。
 
-因此:
+因此现在有一层专门的 scheduler 权限策略:
 
-- 读类能力正常可用
-- 需要确认的高风险动作默认会被拒绝
+- `low` 风险工具默认可用
+- `medium/high` 风险工具只有命中 repo 配置里的 `scheduler.allowedTools` 才可用
+- `bash` / `shell` 还需要命中 `scheduler.allowedCommandPatterns`
+- repo protect 规则继续生效
 
-这让第一版更稳,也更符合“后台 job 以保守执行为主”的定位。
+repo 配置示例:
 
-## 5. `/gui`
+```json
+{
+  "scheduler": {
+    "allowedTools": ["bash", "write"],
+    "allowedCommandPatterns": ["npm test", "npm run lint"],
+    "pollIntervalSeconds": 20,
+    "logRotationBytes": 500000,
+    "logRotationFiles": 4
+  }
+}
+```
+
+这让后台 job 既能执行有价值的自动化,又不会默认拿到整套高风险能力。
+
+## 5. `/schedule status` 和权限摘要
+
+当前你可以直接从命令里看到 scheduler 的有效运行参数:
+
+- `runner` 状态
+- `pid`
+- `log path`
+- effective `poll interval`
+- `log rotation` 配置
+- 最近一次错误摘要
+
+另外:
+
+- `/schedule add`
+- `/schedule show <id>`
+
+都会一起显示该任务当前命中的权限摘要,方便你确认后台任务到底能不能跑到你预期的工具。
+
+## 6. `/gui`
 
 `/gui` 先提供可见性,告诉你现在有哪些 macOS GUI action 已经接通:
 
@@ -109,7 +144,7 @@ spec 规则:
 - `List apps`
 - `Run doctor`
 
-## 6. `macos_gui` 工具
+## 7. `macos_gui` 工具
 
 模型侧使用的是结构化工具:
 
@@ -145,7 +180,7 @@ spec 规则:
   - `keystroke`
   - `menu_click`
 
-## 7. 安全边界
+## 8. 安全边界
 
 `macos_gui` 是高风险工具:
 
